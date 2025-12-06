@@ -2,12 +2,25 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db } from '@/lib/firebase';
+
+interface BookingActivity {
+  id: string;
+  [key: string]: any;
+}
+
+interface DashboardData {
+  total_bookings: number;
+  loyalty_points: number;
+  saved_amount: string;
+  ai_bookings: number;
+  recent_activity: BookingActivity[];
+}
 
 export function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [dashboardData, setDashboardData] = useState({
+  const [dashboardData, setDashboardData] = useState<DashboardData>({
     total_bookings: 0,
     loyalty_points: 0,
     saved_amount: 'SAR 0',

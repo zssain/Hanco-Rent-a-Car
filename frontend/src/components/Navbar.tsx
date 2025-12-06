@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Car, User, LogOut, LayoutDashboard, Calendar } from 'lucide-react';
+import { User, LogOut, LayoutDashboard, Calendar } from 'lucide-react';
 
 export function Navbar() {
   const { user, logout } = useAuth();

@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db } from '@/lib/firebase';
 import { pricingService } from '../services/pricingService';
 import { Calendar, MapPin, TrendingDown, Info } from 'lucide-react';
 

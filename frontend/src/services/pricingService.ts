@@ -174,7 +174,6 @@ export class DynamicPricingService {
 
   private calculateDemandMultiplier(date: Date, city: string): number {
     const dayOfWeek = date.getDay();
-    const hour = date.getHours();
     
     // High demand on weekends (Friday/Saturday in Saudi Arabia)
     if (dayOfWeek === 5 || dayOfWeek === 6) {

@@ -6,8 +6,8 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
 } from 'firebase/auth';
-import { auth } from '../lib/firebase';
-import api from '../lib/api';
+import { auth } from '@/lib/firebase';
+import api from '@/lib/api';
 
 interface UserProfile {
   uid: string;
@@ -90,7 +90,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       // Create user in Firebase
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      const firebaseUser = userCredential.user;
       
       // Register with backend
       const response = await api.post('/api/v1/auth/register', {
