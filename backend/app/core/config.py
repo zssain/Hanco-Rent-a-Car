@@ -56,6 +56,8 @@ class Settings(BaseSettings):
         "http://localhost:8080",
         "https://hanco-ai.web.app",
         "https://hanco-ai.firebaseapp.com",
+        "https://hanco-frontend.onrender.com",
+        "https://hanco-backend.onrender.com",
     ]
     
     # ==================== Crawl4AI Settings ====================
