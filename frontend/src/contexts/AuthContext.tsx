@@ -89,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const register = async (email: string, password: string, fullName: string, phone: string) => {
     try {
       // Create user in Firebase
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await createUserWithEmailAndPassword(auth, email, password);
       
       // Register with backend
       const response = await api.post('/api/v1/auth/register', {
