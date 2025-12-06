@@ -80,8 +80,10 @@ export function ChatbotWidget() {
       // Get Firebase auth token
       const token = user ? await user.getIdToken() : '';
       
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+      
       // Call Gemini-powered backend API
-      const response = await fetch('http://localhost:8000/api/v1/chat/message', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/chat/message`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
