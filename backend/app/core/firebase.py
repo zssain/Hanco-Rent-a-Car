@@ -29,11 +29,22 @@ class FirebaseClient:
     
     def _initialize_firebase(self):
         """Initialize Firebase Admin SDK"""
+        import os
+        import json
+        
         try:
-            # Load Firebase credentials from file
-            cred_path = "app/firebase-key.json"
-            logger.info(f"Loading Firebase credentials from: {cred_path}")
-            cred = credentials.Certificate(cred_path)
+            # Try to load from environment variable first (for production)
+            firebase_creds_json = os.getenv('FIREBASE_CREDENTIALS_JSON')
+            
+            if firebase_creds_json:
+                logger.info("Loading Firebase credentials from environment variable")
+                cred_dict = json.loads(firebase_creds_json)
+                cred = credentials.Certificate(cred_dict)
+            else:
+                # Fallback to file (for local development)
+                cred_path = "app/firebase-key.json"
+                logger.info(f"Loading Firebase credentials from file: {cred_path}")
+                cred = credentials.Certificate(cred_path)
             
             # Initialize Firebase app
             firebase_admin.initialize_app(cred)
