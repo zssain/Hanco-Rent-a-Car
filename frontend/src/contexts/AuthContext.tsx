@@ -6,8 +6,8 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
 } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
-import api from '@/lib/api';
+import { auth } from '../lib/firebase';
+import api from '../lib/api';
 
 interface UserProfile {
   uid: string;
