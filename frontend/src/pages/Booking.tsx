@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { doc, getDoc, collection, addDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db } from '@/lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { pricingService } from '../services/pricingService';
 import { Calendar, CreditCard, MapPin, Car, CheckCircle } from 'lucide-react';

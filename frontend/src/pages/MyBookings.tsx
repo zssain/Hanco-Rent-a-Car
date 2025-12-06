@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { collection, query, where, getDocs, deleteDoc, doc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db } from '@/lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Calendar, MapPin, Car, Trash2, AlertCircle } from 'lucide-react';
 
