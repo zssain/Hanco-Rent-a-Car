@@ -1,0 +1,596 @@
+"""
+Booking management endpoints for Hanco-AI
+Handles rental bookings lifecycle with Firestore integration
+"""
+from fastapi import APIRouter, HTTPException, status, Depends, Query
+from typing import Dict, Any, List, Optional
+from datetime import datetime, date
+import logging
+import uuid
+
+from app.core.firebase import db, Collections
+from app.core.security import get_current_user, require_admin
+from app.schemas.booking import (
+    BookingCreate,
+    BookingUpdate,
+    BookingResponse,
+    BookingListResponse
+)
+from app.schemas.auth import UserResponse
+from google.cloud.firestore_v1 import FieldFilter
+from google.cloud import firestore
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# ==================== Helper Functions ====================
+
+def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> BookingResponse:
+    """Convert Firestore document to BookingResponse schema"""
+    try:
+        # Handle Firestore timestamps
+        created_at = doc_data.get('created_at')
+        updated_at = doc_data.get('updated_at')
+        
+        if isinstance(created_at, datetime):
+            pass
+        elif hasattr(created_at, 'timestamp'):
+            created_at = datetime.fromtimestamp(created_at.timestamp())
+        else:
+            created_at = None
+            
+        if isinstance(updated_at, datetime):
+            pass
+        elif hasattr(updated_at, 'timestamp'):
+            updated_at = datetime.fromtimestamp(updated_at.timestamp())
+        else:
+            updated_at = None
+        
+        # Handle dates
+        start_date = doc_data.get('start_date')
+        end_date = doc_data.get('end_date')
+        
+        if isinstance(start_date, str):
+            start_date = datetime.fromisoformat(start_date).date()
+        elif hasattr(start_date, 'date'):
+            start_date = start_date.date()
+            
+        if isinstance(end_date, str):
+            end_date = datetime.fromisoformat(end_date).date()
+        elif hasattr(end_date, 'date'):
+            end_date = end_date.date()
+        
+        return BookingResponse(
+            id=doc_id,
+            user_id=doc_data.get('user_id'),
+            vehicle_id=doc_data.get('vehicle_id'),
+            start_date=start_date,
+            end_date=end_date,
+            total_price=doc_data.get('total_price', 0.0),
+            status=doc_data.get('status', 'pending'),
+            payment_status=doc_data.get('payment_status', 'pending'),
+            pickup_location=doc_data.get('pickup_location'),
+            dropoff_location=doc_data.get('dropoff_location'),
+            created_at=created_at,
+            updated_at=updated_at
+        )
+    except Exception as e:
+        logger.error(f"Error converting booking document: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing booking data: {str(e)}"
+        )
+
+
+async def check_vehicle_availability(vehicle_id: str, start_date: date, end_date: date) -> tuple[bool, List[Dict]]:
+    """
+    Check if vehicle is available for the given date range
+    Returns: (is_available, conflicting_bookings)
+    """
+    try:
+        # Check if vehicle exists
+        vehicle_ref = db.collection(Collections.VEHICLES).document(vehicle_id)
+        vehicle_doc = vehicle_ref.get()
+        
+        if not vehicle_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Vehicle with ID {vehicle_id} not found"
+            )
+        
+        vehicle_data = vehicle_doc.to_dict()
+        
+        # Check vehicle status
+        if vehicle_data.get('status') not in ['available', 'rented']:
+            return False, []
+        
+        # Query existing bookings
+        bookings_query = db.collection(Collections.BOOKINGS)\
+            .where(filter=FieldFilter('vehicle_id', '==', vehicle_id))\
+            .where(filter=FieldFilter('status', 'in', ['pending', 'confirmed', 'active']))
+        
+        bookings = bookings_query.stream()
+        
+        # Check for date conflicts
+        conflicting_bookings = []
+        for booking_doc in bookings:
+            booking_data = booking_doc.to_dict()
+            booking_start = booking_data.get('start_date')
+            booking_end = booking_data.get('end_date')
+            
+            # Convert to date objects
+            if isinstance(booking_start, str):
+                booking_start = datetime.fromisoformat(booking_start).date()
+            elif hasattr(booking_start, 'date'):
+                booking_start = booking_start.date()
+                
+            if isinstance(booking_end, str):
+                booking_end = datetime.fromisoformat(booking_end).date()
+            elif hasattr(booking_end, 'date'):
+                booking_end = booking_end.date()
+            
+            # Check for overlap
+            if start_date <= booking_end and end_date >= booking_start:
+                conflicting_bookings.append({
+                    "booking_id": booking_doc.id,
+                    "start_date": str(booking_start),
+                    "end_date": str(booking_end)
+                })
+        
+        return len(conflicting_bookings) == 0, conflicting_bookings
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking availability: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check availability: {str(e)}"
+        )
+
+
+async def calculate_booking_price(vehicle_id: str, start_date: date, end_date: date) -> float:
+    """
+    Calculate total price for booking
+    In production, this would call the dynamic pricing service
+    For now, uses base_daily_rate * number of days
+    """
+    try:
+        # Get vehicle details
+        vehicle_ref = db.collection(Collections.VEHICLES).document(vehicle_id)
+        vehicle_doc = vehicle_ref.get()
+        
+        if not vehicle_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Vehicle with ID {vehicle_id} not found"
+            )
+        
+        vehicle_data = vehicle_doc.to_dict()
+        base_rate = vehicle_data.get('base_daily_rate', 0)
+        
+        # Calculate number of days
+        num_days = (end_date - start_date).days
+        if num_days <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid date range"
+            )
+        
+        # Simple calculation - in production, call pricing service
+        total_price = base_rate * num_days
+        
+        logger.info(f"Calculated price for {vehicle_id}: ${total_price} ({num_days} days @ ${base_rate}/day)")
+        
+        return total_price
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating price: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to calculate price: {str(e)}"
+        )
+
+
+# ==================== Endpoints ====================
+
+@router.post("", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
+async def create_booking(
+    booking: BookingCreate,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Create a new booking
+    
+    Flow:
+    1. Validate dates
+    2. Check vehicle availability
+    3. Calculate total price
+    4. Create booking with status='pending' and payment_status='unpaid'
+    
+    Requires authentication.
+    """
+    try:
+        # Validate dates
+        if booking.end_date <= booking.start_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End date must be after start date"
+            )
+        
+        if booking.start_date < date.today():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Start date cannot be in the past"
+            )
+        
+        # Check vehicle availability
+        is_available, conflicts = await check_vehicle_availability(
+            booking.vehicle_id,
+            booking.start_date,
+            booking.end_date
+        )
+        
+        if not is_available:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Vehicle not available for selected dates. Conflicting bookings: {len(conflicts)}"
+            )
+        
+        # Calculate total price
+        total_price = await calculate_booking_price(
+            booking.vehicle_id,
+            booking.start_date,
+            booking.end_date
+        )
+        
+        # Generate booking ID
+        booking_id = str(uuid.uuid4())
+        
+        # Prepare booking data
+        booking_data = {
+            'id': booking_id,
+            'user_id': current_user.uid,
+            'vehicle_id': booking.vehicle_id,
+            'start_date': booking.start_date.isoformat(),
+            'end_date': booking.end_date.isoformat(),
+            'total_price': total_price,
+            'status': 'pending',
+            'payment_status': 'unpaid',
+            'pickup_location': booking.pickup_location,
+            'dropoff_location': booking.dropoff_location,
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'updated_at': firestore.SERVER_TIMESTAMP
+        }
+        
+        # Create booking in Firestore
+        doc_ref = db.collection(Collections.BOOKINGS).document(booking_id)
+        doc_ref.set(booking_data)
+        
+        logger.info(f"Booking created: {booking_id} for user {current_user.uid}")
+        
+        # Fetch created document
+        created_doc = doc_ref.get()
+        return booking_doc_to_response(created_doc.id, created_doc.to_dict())
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating booking: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create booking: {str(e)}"
+        )
+
+
+@router.get("", response_model=BookingListResponse)
+async def list_user_bookings(
+    current_user: UserResponse = Depends(get_current_user),
+    status_filter: Optional[str] = Query(None, description="Filter by status"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page")
+):
+    """
+    Get all bookings for the current user
+    
+    Returns bookings ordered by creation date (newest first).
+    """
+    try:
+        # Query user's bookings
+        query = db.collection(Collections.BOOKINGS)\
+            .where(filter=FieldFilter('user_id', '==', current_user.uid))
+        
+        # Apply status filter if provided
+        if status_filter:
+            query = query.where(filter=FieldFilter('status', '==', status_filter))
+        
+        # Execute query
+        docs = query.stream()
+        
+        # Convert to list
+        bookings = [booking_doc_to_response(doc.id, doc.to_dict()) for doc in docs]
+        
+        # Sort by created_at (newest first)
+        bookings.sort(key=lambda x: x.created_at or datetime.min, reverse=True)
+        
+        # Apply pagination
+        total = len(bookings)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_bookings = bookings[start_idx:end_idx]
+        
+        logger.info(f"Listed {len(paginated_bookings)} bookings for user {current_user.uid}")
+        
+        return BookingListResponse(
+            bookings=paginated_bookings,
+            total=total,
+            page=page,
+            page_size=page_size
+        )
+        
+    except Exception as e:
+        logger.error(f"Error listing bookings: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list bookings: {str(e)}"
+        )
+
+
+@router.get("/all", response_model=BookingListResponse)
+async def list_all_bookings(
+    current_user: UserResponse = Depends(require_admin),
+    status_filter: Optional[str] = Query(None, description="Filter by status"),
+    city: Optional[str] = Query(None, description="Filter by vehicle city"),
+    date_from: Optional[date] = Query(None, description="Filter bookings from this date"),
+    date_to: Optional[date] = Query(None, description="Filter bookings to this date"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page")
+):
+    """
+    Get all bookings across all users (Admin only)
+    
+    Supports filtering by status, city, and date range.
+    """
+    try:
+        # Start with base query
+        query = db.collection(Collections.BOOKINGS)
+        
+        # Apply status filter
+        if status_filter:
+            query = query.where(filter=FieldFilter('status', '==', status_filter))
+        
+        # Execute query
+        docs = query.stream()
+        
+        # Convert to list and apply additional filters
+        bookings = []
+        for doc in docs:
+            doc_data = doc.to_dict()
+            
+            # Date range filter (on start_date)
+            if date_from or date_to:
+                start_date = doc_data.get('start_date')
+                if isinstance(start_date, str):
+                    start_date = datetime.fromisoformat(start_date).date()
+                elif hasattr(start_date, 'date'):
+                    start_date = start_date.date()
+                
+                if date_from and start_date < date_from:
+                    continue
+                if date_to and start_date > date_to:
+                    continue
+            
+            # City filter (requires vehicle lookup - inefficient but necessary with Firestore)
+            if city:
+                vehicle_id = doc_data.get('vehicle_id')
+                vehicle_doc = db.collection(Collections.VEHICLES).document(vehicle_id).get()
+                if vehicle_doc.exists:
+                    vehicle_data = vehicle_doc.to_dict()
+                    if vehicle_data.get('city') != city:
+                        continue
+                else:
+                    continue
+            
+            bookings.append(booking_doc_to_response(doc.id, doc_data))
+        
+        # Sort by created_at (newest first)
+        bookings.sort(key=lambda x: x.created_at or datetime.min, reverse=True)
+        
+        # Apply pagination
+        total = len(bookings)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_bookings = bookings[start_idx:end_idx]
+        
+        logger.info(f"Admin listed {len(paginated_bookings)} bookings (total: {total})")
+        
+        return BookingListResponse(
+            bookings=paginated_bookings,
+            total=total,
+            page=page,
+            page_size=page_size
+        )
+        
+    except Exception as e:
+        logger.error(f"Error listing all bookings: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list bookings: {str(e)}"
+        )
+
+
+@router.get("/{booking_id}", response_model=BookingResponse)
+async def get_booking(
+    booking_id: str,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Get booking details by ID
+    
+    Users can only view their own bookings.
+    Admins can view any booking.
+    """
+    try:
+        # Get booking document
+        doc_ref = db.collection(Collections.BOOKINGS).document(booking_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Booking with ID {booking_id} not found"
+            )
+        
+        booking_data = doc.to_dict()
+        
+        # Check authorization (user can only view own bookings unless admin)
+        if booking_data.get('user_id') != current_user.uid and current_user.role != 'admin':
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only view your own bookings"
+            )
+        
+        logger.info(f"Retrieved booking: {booking_id}")
+        return booking_doc_to_response(doc.id, booking_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving booking {booking_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve booking: {str(e)}"
+        )
+
+
+@router.delete("/{booking_id}", status_code=status.HTTP_200_OK)
+async def cancel_booking(
+    booking_id: str,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Cancel a booking
+    
+    Users can cancel their own bookings if not already cancelled or completed.
+    Sets status to 'cancelled'.
+    """
+    try:
+        # Get booking document
+        doc_ref = db.collection(Collections.BOOKINGS).document(booking_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Booking with ID {booking_id} not found"
+            )
+        
+        booking_data = doc.to_dict()
+        
+        # Check authorization
+        if booking_data.get('user_id') != current_user.uid and current_user.role != 'admin':
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only cancel your own bookings"
+            )
+        
+        # Check if booking can be cancelled
+        current_status = booking_data.get('status')
+        if current_status in ['cancelled', 'completed']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot cancel booking with status: {current_status}"
+            )
+        
+        # Update booking status
+        doc_ref.update({
+            'status': 'cancelled',
+            'updated_at': firestore.SERVER_TIMESTAMP
+        })
+        
+        logger.info(f"Booking cancelled: {booking_id} by user {current_user.uid}")
+        
+        return {
+            "message": f"Booking {booking_id} cancelled successfully",
+            "booking_id": booking_id,
+            "status": "cancelled"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling booking {booking_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cancel booking: {str(e)}"
+        )
+
+
+@router.post("/{booking_id}/confirm", response_model=BookingResponse)
+async def confirm_booking(
+    booking_id: str,
+    current_user: UserResponse = Depends(get_current_user)
+):
+    """
+    Confirm a booking after successful payment
+    
+    Called internally by payment service or manually by user/admin.
+    Sets status='confirmed' and payment_status='paid'.
+    """
+    try:
+        # Get booking document
+        doc_ref = db.collection(Collections.BOOKINGS).document(booking_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Booking with ID {booking_id} not found"
+            )
+        
+        booking_data = doc.to_dict()
+        
+        # Check authorization
+        if booking_data.get('user_id') != current_user.uid and current_user.role != 'admin':
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only confirm your own bookings"
+            )
+        
+        # Check current status
+        current_status = booking_data.get('status')
+        if current_status == 'cancelled':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot confirm a cancelled booking"
+            )
+        
+        if current_status == 'confirmed':
+            # Already confirmed, return current state
+            return booking_doc_to_response(doc.id, booking_data)
+        
+        # Update booking
+        doc_ref.update({
+            'status': 'confirmed',
+            'payment_status': 'paid',
+            'updated_at': firestore.SERVER_TIMESTAMP
+        })
+        
+        logger.info(f"Booking confirmed: {booking_id}")
+        
+        # Fetch updated document
+        updated_doc = doc_ref.get()
+        return booking_doc_to_response(updated_doc.id, updated_doc.to_dict())
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error confirming booking {booking_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to confirm booking: {str(e)}"
+        )

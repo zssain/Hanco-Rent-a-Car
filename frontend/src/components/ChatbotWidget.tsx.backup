@@ -1,0 +1,785 @@
+import { useState, useEffect, useRef } from 'react';
+import { MessageCircle, X, Send, Sparkles } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+
+interface Message {
+  role: 'user' | 'assistant';
+  message: string;
+  timestamp: Date;
+}
+
+interface BookingState {
+  step: 'greeting' | 'category' | 'vehicle_selection' | 'dates' | 'locations' | 'pricing' | 'confirmation' | 'payment' | 'complete';
+  category?: string;
+  vehicles?: any[];
+  selectedVehicle?: any;
+  startDate?: string;
+  endDate?: string;
+  city?: string;
+  pickupLocation?: string;
+  dropoffLocation?: string;
+  dropoffCity?: string;
+  pricingResult?: any;
+  bookingId?: string;
+  availableLocations?: string[];
+  dropoffLocations?: string[];
+  subStep?: string;
+}
+
+export function ChatbotWidget() {
+  const { user } = useAuth();
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState<string>('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Initialize session ID from localStorage
+  useEffect(() => {
+    const storedSessionId = localStorage.getItem('chat_session_id');
+    if (storedSessionId) {
+      setSessionId(storedSessionId);
+      loadChatHistory(storedSessionId);
+    } else {
+      const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setSessionId(newSessionId);
+      localStorage.setItem('chat_session_id', newSessionId);
+      
+      // Send initial Gemini-powered greeting
+      const greeting: Message = {
+        role: 'assistant',
+        message: "Hello! 👋 I'm Hanco AI Assistant, powered by advanced AI. I can help you:\n\n🚗 Find the perfect vehicle\n💰 Get pricing & compare options\n📅 Check availability\n📍 Answer questions about our services\n\nWhat would you like to know?",
+        timestamp: new Date()
+      };
+      setMessages([greeting]);
+      saveChatHistory([greeting]);
+    }
+  }, []);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const loadChatHistory = (sid: string) => {
+    const stored = localStorage.getItem(`chat_history_${sid}`);
+    if (stored) {
+      try {
+        const history = JSON.parse(stored);
+        setMessages(history.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })));
+      } catch (e) {
+        console.error('Failed to load chat history:', e);
+      }
+    }
+  };
+
+  const saveChatHistory = (msgs: Message[]) => {
+    if (sessionId) {
+      localStorage.setItem(`chat_history_${sessionId}`, JSON.stringify(msgs));
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim()) return;
+
+    const userMessage: Message = { 
+      role: 'user', 
+      message: input,
+      timestamp: new Date()
+    };
+    
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
+    setInput('');
+    setLoading(true);
+
+    try {
+      // Call backend Gemini API for intelligent responses
+      const response = await fetch('http://localhost:8000/api/v1/chat/message', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${user?.accessToken || ''}`
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          message: input
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      const assistantMessage: Message = {
+        role: 'assistant',
+        message: data.reply,
+        timestamp: new Date()
+      };
+
+      const finalMessages = [...updatedMessages, assistantMessage];
+      setMessages(finalMessages);
+      saveChatHistory(finalMessages);
+      
+      // Handle extracted booking info from Gemini
+      if (data.intent && data.extracted) {
+        console.log('Gemini detected intent:', data.intent, data.extracted);
+        // Could trigger booking flow if needed
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      const errorMessage: Message = {
+        role: 'assistant',
+        message: 'Sorry, I encountered an error connecting to my AI brain 🧠. Please try again or use the Booking page directly.',
+        timestamp: new Date()
+      };
+      const finalMessages = [...updatedMessages, errorMessage];
+      setMessages(finalMessages);
+      saveChatHistory(finalMessages);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const clearChat = () => {
+    if (step === 'greeting') {
+      if (userInput.match(/\b(yes|sure|ok|yeah|yep|want|need|like|rent|book)\b/)) {
+        return {
+          message: "Great! 🚗 Let's find you the perfect vehicle.\n\nWhat type of car would you like?\n\n1️⃣ **Economy** (~95-120 SAR/day) - Fuel-efficient, city driving\n2️⃣ **Compact** (~135-160 SAR/day) - Toyota Corolla, Hyundai Elantra\n3️⃣ **Sedan** (~185-220 SAR/day) - Camry, Accord, spacious\n4️⃣ **SUV** (~260-310 SAR/day) - Land Cruiser, 7-seater\n5️⃣ **Luxury** (~425-500 SAR/day) - BMW, Mercedes\n\nJust type the category name or number!",
+          newState: { ...state, step: 'category' }
+        };
+      } else if (userInput.match(/\b(no|not|maybe|later)\b/)) {
+        return {
+          message: "No problem! I'm here whenever you need help.\n\nFeel free to ask me:\n• Vehicle information\n• Pricing details\n• Locations we serve\n• How booking works\n\nWhat would you like to know?",
+          newState: state
+        };
+      } else {
+        return {
+          message: "I can help you rent a car! 🚗\n\nWould you like to:\n✅ Start a new booking\n📋 Learn about our vehicles\n💰 Check pricing\n📍 See our locations\n\nJust let me know!",
+          newState: state
+        };
+      }
+    }
+
+    // STEP 2: Category Selection
+    if (step === 'category') {
+      const categoryMap: any = {
+        'economy': 'Economy',
+        '1': 'Economy',
+        'compact': 'Compact',
+        '2': 'Compact',
+        'sedan': 'Sedan',
+        '3': 'Sedan',
+        'suv': 'SUV',
+        '4': 'SUV',
+        'luxury': 'Luxury',
+        '5': 'Luxury'
+      };
+
+      const selectedCategory = Object.keys(categoryMap).find(key => userInput.includes(key));
+      
+      if (selectedCategory) {
+        const category = categoryMap[selectedCategory];
+        
+        // Fetch vehicles from Firebase
+        const vehiclesRef = collection(db, 'vehicles');
+        const q = query(vehiclesRef, where('category', '==', category), where('availability_status', '==', 'available'));
+        const snapshot = await getDocs(q);
+        
+        const vehicles = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        if (vehicles.length === 0) {
+          return {
+            message: `Sorry, we don't have any ${category} vehicles available right now. 😔\n\nWould you like to try another category?\n\n1️⃣ Economy\n2️⃣ Compact\n3️⃣ Sedan\n4️⃣ SUV\n5️⃣ Luxury`,
+            newState: state
+          };
+        }
+
+        let vehicleList = `Perfect! Here are our available ${category} vehicles:\n\n`;
+        vehicles.forEach((v: any, idx: number) => {
+          vehicleList += `${idx + 1}️⃣ **${v.name}**\n`;
+          vehicleList += `   ${v.make} ${v.model} ${v.year}\n`;
+          vehicleList += `   ⭐ ${v.rating}/5 | ${v.seats} seats | ${v.transmission}\n`;
+          vehicleList += `   Base rate: ${v.base_daily_rate} SAR/day\n`;
+          vehicleList += `   Features: ${v.features?.slice(0, 3).join(', ')}\n\n`;
+        });
+        
+        vehicleList += `Which one would you like? (Type the number or vehicle name)`;
+
+        return {
+          message: vehicleList,
+          newState: { ...state, step: 'vehicle_selection', category, vehicles }
+        };
+      } else {
+        return {
+          message: "I didn't catch that. Please choose from:\n\n1️⃣ Economy\n2️⃣ Compact\n3️⃣ Sedan\n4️⃣ SUV\n5️⃣ Luxury\n\nType the category name or number.",
+          newState: state
+        };
+      }
+    }
+
+    // STEP 3: Vehicle Selection
+    if (step === 'vehicle_selection' && state.vehicles) {
+      const vehicleIndex = parseInt(userInput) - 1;
+      let selectedVehicle = null;
+
+      if (!isNaN(vehicleIndex) && vehicleIndex >= 0 && vehicleIndex < state.vehicles.length) {
+        selectedVehicle = state.vehicles[vehicleIndex];
+      } else {
+        selectedVehicle = state.vehicles.find((v: any) => 
+          v.name.toLowerCase().includes(userInput) || 
+          v.make.toLowerCase().includes(userInput) ||
+          v.model.toLowerCase().includes(userInput)
+        );
+      }
+
+      if (selectedVehicle) {
+        return {
+          message: `Excellent choice! 🎉 The **${selectedVehicle.name}** is a great vehicle.\n\n📅 Now, let's set up your rental dates.\n\nWhen would you like to **pick up** the car?\n\nPlease provide the date in format: DD/MM/YYYY or YYYY-MM-DD\n(e.g., 10/12/2025 or 2025-12-10)`,
+          newState: { ...state, step: 'dates', selectedVehicle, subStep: 'pickup_date' }
+        };
+      } else {
+        return {
+          message: `I couldn't find that vehicle. Please choose by number (1-${state.vehicles.length}) or type the vehicle name from the list above.`,
+          newState: state
+        };
+      }
+    }
+
+    // STEP 4: Dates Collection
+    if (step === 'dates') {
+      const subStep = (state as any).subStep;
+
+      if (subStep === 'pickup_date') {
+        const date = parseDate(userInput);
+        if (date && date >= new Date()) {
+          return {
+            message: `Great! Pickup date: **${formatDate(date)}**\n\n📅 When would you like to **drop off** the car?\n\nPlease provide the date (must be after ${formatDate(date)}):`,
+            newState: { ...state, startDate: date.toISOString().split('T')[0], subStep: 'dropoff_date' }
+          };
+        } else {
+          return {
+            message: "Please provide a valid future date in format DD/MM/YYYY or YYYY-MM-DD\n(e.g., 15/12/2025)",
+            newState: state
+          };
+        }
+      }
+
+      if (subStep === 'dropoff_date' && state.startDate) {
+        const date = parseDate(userInput);
+        const startDate = new Date(state.startDate);
+        
+        if (date && date > startDate) {
+          const days = Math.ceil((date.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+          
+          return {
+            message: `Perfect! Rental period: **${days} days**\n(${formatDate(startDate)} to ${formatDate(date)})\n\n📍 Now, where would you like to pick up the car?\n\nChoose a city:\n1️⃣ Riyadh\n2️⃣ Jeddah\n3️⃣ Dammam\n4️⃣ Mecca\n5️⃣ Medina`,
+            newState: { ...state, endDate: date.toISOString().split('T')[0], step: 'locations', subStep: 'city' }
+          };
+        } else {
+          return {
+            message: `Drop-off date must be after ${formatDate(startDate)}. Please try again:`,
+            newState: state
+          };
+        }
+      }
+    }
+
+    // STEP 5: Locations Collection
+    if (step === 'locations') {
+      const subStep = (state as any).subStep;
+
+      if (subStep === 'city') {
+        const cityMap: any = {
+          '1': 'Riyadh', 'riyadh': 'Riyadh',
+          '2': 'Jeddah', 'jeddah': 'Jeddah',
+          '3': 'Dammam', 'dammam': 'Dammam',
+          '4': 'Mecca', 'mecca': 'Mecca', 'makkah': 'Mecca',
+          '5': 'Medina', 'medina': 'Medina', 'madinah': 'Medina'
+        };
+
+        const selectedCity = Object.keys(cityMap).find(key => userInput.includes(key));
+        
+        if (selectedCity) {
+          const city = cityMap[selectedCity];
+          const locations = getLocationsByCity(city);
+          
+          let locationMsg = `Great! You selected **${city}** 🌆\n\nChoose your pickup location:\n\n`;
+          locations.forEach((loc: string, idx: number) => {
+            locationMsg += `${idx + 1}️⃣ ${loc}\n`;
+          });
+
+          return {
+            message: locationMsg,
+            newState: { ...state, city, subStep: 'pickup_location', availableLocations: locations }
+          };
+        } else {
+          return {
+            message: "Please choose a valid city:\n1️⃣ Riyadh\n2️⃣ Jeddah\n3️⃣ Dammam\n4️⃣ Mecca\n5️⃣ Medina",
+            newState: state
+          };
+        }
+      }
+
+      if (subStep === 'pickup_location' && (state as any).availableLocations) {
+        const locations = (state as any).availableLocations;
+        const locIndex = parseInt(userInput) - 1;
+        let selectedLoc = null;
+
+        if (!isNaN(locIndex) && locIndex >= 0 && locIndex < locations.length) {
+          selectedLoc = locations[locIndex];
+        } else {
+          selectedLoc = locations.find((loc: string) => loc.toLowerCase().includes(userInput));
+        }
+
+        if (selectedLoc) {
+          return {
+            message: `Pickup: **${selectedLoc}** ✅\n\n📍 Where would you like to drop off the car?\n\n**Same location or different?**\n\nOptions:\n1️⃣ Same location (${selectedLoc})\n2️⃣ Choose different city\n3️⃣ Different location in ${state.city}`,
+            newState: { ...state, pickupLocation: selectedLoc, subStep: 'dropoff_choice' }
+          };
+        } else {
+          return {
+            message: `Please choose by number (1-${locations.length}) or type the location name.`,
+            newState: state
+          };
+        }
+      }
+
+      if (subStep === 'dropoff_choice' && state.pickupLocation) {
+        if (userInput.includes('1') || userInput.includes('same')) {
+          // Calculate final pricing
+          const pricing = pricingService.calculatePrice(
+            state.selectedVehicle.base_daily_rate,
+            state.category || 'Economy',
+            new Date(state.startDate!),
+            new Date(state.endDate!),
+            state.city!,
+            state.pickupLocation!,
+            state.pickupLocation!
+          );
+
+          return {
+            message: generatePricingSummary(state, state.pickupLocation!, pricing),
+            newState: { ...state, dropoffLocation: state.pickupLocation, step: 'pricing', pricingResult: pricing }
+          };
+        } else if (userInput.includes('2') || userInput.includes('city')) {
+          return {
+            message: "Choose drop-off city:\n1️⃣ Riyadh\n2️⃣ Jeddah\n3️⃣ Dammam\n4️⃣ Mecca\n5️⃣ Medina",
+            newState: { ...state, subStep: 'dropoff_city' }
+          };
+        } else if (userInput.includes('3') || userInput.includes('different')) {
+          const locations = (state as any).availableLocations;
+          let locationMsg = `Choose drop-off location in ${state.city}:\n\n`;
+          locations.forEach((loc: string, idx: number) => {
+            locationMsg += `${idx + 1}️⃣ ${loc}\n`;
+          });
+          return {
+            message: locationMsg,
+            newState: { ...state, subStep: 'dropoff_location_same_city' }
+          };
+        } else {
+          return {
+            message: "Please choose:\n1️⃣ Same location\n2️⃣ Different city\n3️⃣ Different location same city",
+            newState: state
+          };
+        }
+      }
+
+      if (subStep === 'dropoff_city') {
+        const cityMap: any = {
+          '1': 'Riyadh', 'riyadh': 'Riyadh',
+          '2': 'Jeddah', 'jeddah': 'Jeddah',
+          '3': 'Dammam', 'dammam': 'Dammam',
+          '4': 'Mecca', 'mecca': 'Mecca',
+          '5': 'Medina', 'medina': 'Medina'
+        };
+
+        const selectedCity = Object.keys(cityMap).find(key => userInput.includes(key));
+        
+        if (selectedCity) {
+          const dropoffCity = cityMap[selectedCity];
+          const locations = getLocationsByCity(dropoffCity);
+          
+          let locationMsg = `Drop-off city: **${dropoffCity}**\n\nChoose location:\n\n`;
+          locations.forEach((loc: string, idx: number) => {
+            locationMsg += `${idx + 1}️⃣ ${loc}\n`;
+          });
+
+          return {
+            message: locationMsg,
+            newState: { ...state, dropoffCity, subStep: 'dropoff_location_diff_city', dropoffLocations: locations }
+          };
+        }
+      }
+
+      if ((subStep === 'dropoff_location_same_city' || subStep === 'dropoff_location_diff_city') && (state as any).availableLocations) {
+        const locations = subStep === 'dropoff_location_diff_city' ? (state as any).dropoffLocations : (state as any).availableLocations;
+        const locIndex = parseInt(userInput) - 1;
+        let selectedLoc = null;
+
+        if (!isNaN(locIndex) && locIndex >= 0 && locIndex < locations.length) {
+          selectedLoc = locations[locIndex];
+        } else {
+          selectedLoc = locations.find((loc: string) => loc.toLowerCase().includes(userInput));
+        }
+
+        if (selectedLoc) {
+          // Calculate final pricing
+          const pricing = pricingService.calculatePrice(
+            state.selectedVehicle.base_daily_rate,
+            state.category || 'Economy',
+            new Date(state.startDate!),
+            new Date(state.endDate!),
+            state.city!,
+            state.pickupLocation!,
+            selectedLoc
+          );
+
+          return {
+            message: generatePricingSummary(state, selectedLoc, pricing),
+            newState: { ...state, dropoffLocation: selectedLoc, step: 'pricing', pricingResult: pricing }
+          };
+        }
+      }
+    }
+
+    // STEP 6: Pricing Confirmation
+    if (step === 'pricing' && state.pricingResult) {
+      if (userInput.match(/\b(yes|confirm|book|proceed|ok|sure)\b/)) {
+        // Create booking
+        if (!auth.currentUser) {
+          return {
+            message: "⚠️ You need to be logged in to complete the booking.\n\nPlease log in and come back to complete your reservation!\n\nYour selection has been saved. 😊",
+            newState: { ...state, step: 'complete' }
+          };
+        }
+
+        try {
+          const bookingData = {
+            user_id: auth.currentUser.uid,
+            vehicle_id: state.selectedVehicle.id,
+            vehicle_name: state.selectedVehicle.name,
+            start_date: state.startDate,
+            end_date: state.endDate,
+            pickup_location: state.pickupLocation,
+            dropoff_location: state.dropoffLocation,
+            total_price: state.pricingResult.totalPrice,
+            daily_price: state.pricingResult.dailyPrice,
+            status: 'confirmed',
+            payment_status: 'completed',
+            payment_method: 'chatbot_booking',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+
+          const bookingsRef = collection(db, 'bookings');
+          const bookingDoc = await addDoc(bookingsRef, bookingData);
+
+          return {
+            message: `🎉 **Booking Confirmed!**\n\nBooking ID: **${bookingDoc.id.slice(0, 8).toUpperCase()}**\n\n✅ ${state.selectedVehicle.name}\n✅ ${formatDate(new Date(state.startDate!))} to ${formatDate(new Date(state.endDate!))}\n✅ ${state.pricingResult.days} days\n✅ Pickup: ${state.pickupLocation}\n✅ Dropoff: ${state.dropoffLocation}\n✅ Total: **${state.pricingResult.totalPrice} SAR**\n\n📧 Confirmation email sent!\n📱 Check "My Bookings" for details.\n\nThank you for choosing Hanco AI! 🚗💨\n\nNeed anything else?`,
+            newState: { ...state, step: 'complete', bookingId: bookingDoc.id }
+          };
+        } catch (error) {
+          return {
+            message: "Sorry, there was an error creating your booking. Please try again or use the website booking form.",
+            newState: state
+          };
+        }
+      } else if (userInput.match(/\b(no|cancel|change|back)\b/)) {
+        return {
+          message: "No problem! Would you like to:\n\n1️⃣ Change dates\n2️⃣ Choose different vehicle\n3️⃣ Change locations\n4️⃣ Start over\n\nWhat would you like to modify?",
+          newState: state
+        };
+      } else {
+        return {
+          message: "Would you like to confirm this booking?\n\n✅ Type **YES** to confirm\n❌ Type **NO** to make changes",
+          newState: state
+        };
+      }
+    }
+
+    // STEP 7: Complete - Ready for new booking
+    if (step === 'complete') {
+      if (userInput.match(/\b(yes|new|another|more)\b/)) {
+        return {
+          message: "Great! Let's find you another vehicle. 🚗\n\nWhat type of car would you like?\n\n1️⃣ Economy\n2️⃣ Compact\n3️⃣ Sedan\n4️⃣ SUV\n5️⃣ Luxury",
+          newState: { step: 'category' }
+        };
+      } else {
+        return {
+          message: "Thank you for using Hanco AI! 😊\n\nIf you need anything else, just ask!\n\nI can help with:\n🚗 New bookings\n📋 Vehicle information\n💰 Pricing questions\n📍 Location details",
+          newState: { step: 'greeting' }
+        };
+      }
+    }
+
+    // Default fallback
+    return {
+      message: "I'm not sure what you mean. Let me help you start a booking.\n\nWould you like to rent a car? (Yes/No)",
+      newState: { step: 'greeting' }
+    };
+  };
+
+  // Helper functions
+  const parseDate = (input: string): Date | null => {
+    const patterns = [
+      /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/,  // DD/MM/YYYY or DD-MM-YYYY
+      /(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/,  // YYYY/MM/DD or YYYY-MM-DD
+    ];
+
+    for (const pattern of patterns) {
+      const match = input.match(pattern);
+      if (match) {
+        if (match[0].startsWith('20')) {
+          // YYYY-MM-DD
+          const date = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+          if (!isNaN(date.getTime())) return date;
+        } else {
+          // DD/MM/YYYY
+          const date = new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
+          if (!isNaN(date.getTime())) return date;
+        }
+      }
+    }
+    return null;
+  };
+
+  const formatDate = (date: Date | string): string => {
+    const d = typeof date === 'string' ? new Date(date) : date;
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const getLocationsByCity = (city: string): string[] => {
+    const locations: any = {
+      'Riyadh': ['Riyadh Airport', 'Riyadh Downtown', 'Olaya District', 'Diplomatic Quarter'],
+      'Jeddah': ['Jeddah Airport', 'Jeddah Corniche', 'Al-Hamra District', 'Red Sea Mall'],
+      'Dammam': ['Dammam Airport', 'Dammam City Center', 'Al Shatea District', 'Dhahran'],
+      'Mecca': ['Mecca Central', 'Aziziyah District', 'Clock Tower Area'],
+      'Medina': ['Medina Airport', 'City Center', 'Haram Area']
+    };
+    return locations[city] || ['City Center', 'Airport'];
+  };
+
+  const generatePricingSummary = (state: BookingState, dropoffLocation: string, pricing: any): string => {
+    const intercityNote = state.pickupLocation !== dropoffLocation && state.city !== dropoffLocation.split(' ')[0] ? '\n🚗 **Intercity rental** - Distance premium applied' : '';
+    
+    // Calculate days
+    const days = Math.ceil((new Date(state.endDate!).getTime() - new Date(state.startDate!).getTime()) / (1000 * 60 * 60 * 24));
+    
+    // Build discount/premium text from pricing breakdown
+    let pricingDetails = '✓ All discounts applied';
+    if (pricing.breakdown && Array.isArray(pricing.breakdown)) {
+      const relevantBreakdown = pricing.breakdown
+        .filter((b: any) => Math.abs(b.value) > 0.1)
+        .map((b: any) => `✓ ${b.label}: ${b.impact === '-' ? '-' : '+'}${Math.abs(b.value).toFixed(0)}%`)
+        .join('\n');
+      if (relevantBreakdown) {
+        pricingDetails = relevantBreakdown;
+      }
+    }
+    
+    return `💰 **Your Booking Summary**\n\n` +
+           `🚗 **Vehicle:** ${state.selectedVehicle?.name}\n` +
+           `📅 **Period:** ${formatDate(state.startDate!)} to ${formatDate(state.endDate!)}\n` +
+           `⏱️ **Duration:** ${days} days\n` +
+           `📍 **Pickup:** ${state.pickupLocation}\n` +
+           `📍 **Dropoff:** ${dropoffLocation}${intercityNote}\n\n` +
+           `💵 **Daily Rate:** ${Math.round(pricing.dailyPrice)} SAR/day\n` +
+           `💵 **Total Price:** **${Math.round(pricing.totalPrice)} SAR**\n` +
+           (pricing.savings > 0 ? `💚 **You Save:** ${Math.round(pricing.savings)} SAR\n` : '') +
+           `\n✨ Dynamic pricing includes:\n` +
+           `${pricingDetails}\n\n` +
+           `📋 **Included:**\n` +
+           `✓ Full insurance\n` +
+           `✓ 24/7 roadside assistance\n` +
+           `✓ Unlimited mileage\n\n` +
+           `**Ready to confirm this booking?** (Yes/No)`;
+  };
+  */ // End of old keyword-matching logic
+  
+  const clearChat = () => {
+    if (window.confirm('Clear chat history?')) {
+      setMessages([]);
+      const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setSessionId(newSessionId);
+      localStorage.setItem('chat_session_id', newSessionId);
+      localStorage.removeItem(`chat_history_${sessionId}`);
+    }
+  };
+
+  // Extract pricing/booking suggestions from message
+  const renderMessageContent = (msg: Message) => {
+    const message = msg.message;
+    
+    // Check for pricing information (SAR amounts)
+    const priceMatch = message.match(/(\d+(?:,\d{3})*(?:\.\d{2})?)\s*SAR/g);
+    
+    // Check for booking suggestions
+    const hasBookingCTA = message.toLowerCase().includes('book') || 
+                          message.toLowerCase().includes('reserve') ||
+                          message.toLowerCase().includes('rent');
+
+    return (
+      <div className="space-y-2">
+        <p className="whitespace-pre-wrap">{message}</p>
+        
+        {priceMatch && priceMatch.length > 0 && (
+          <div className="mt-3 p-3 bg-red-50 rounded-lg border border-red-200">
+            <p className="text-xs text-red-800 font-medium mb-1">💰 Pricing Info:</p>
+            {priceMatch.map((price, idx) => (
+              <p key={idx} className="text-sm font-bold text-red-700">{price}</p>
+            ))}
+          </div>
+        )}
+
+        {hasBookingCTA && msg.role === 'assistant' && (
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => window.location.href = '/vehicles'}
+              className="text-xs bg-red-700 text-white px-3 py-2 rounded-lg hover:bg-red-800 transition-colors"
+            >
+              Browse Vehicles
+            </button>
+            <button
+              onClick={() => window.location.href = '/my-bookings'}
+              className="text-xs bg-gray-100 text-gray-900 px-3 py-2 rounded-lg hover:bg-gray-200 transition-colors"
+            >
+              My Bookings
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      {/* Chat Button */}
+      {!isOpen && (
+        <button
+          onClick={() => setIsOpen(true)}
+          className="fixed bottom-6 right-6 bg-red-700 hover:bg-red-800 text-white rounded-full p-4 shadow-lg z-50 transition-all transform hover:scale-105"
+          aria-label="Open chat"
+        >
+          <MessageCircle className="h-6 w-6" />
+          {messages.length > 0 && (
+            <span className="absolute -top-1 -right-1 bg-yellow-400 text-gray-900 text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
+              {messages.filter(m => m.role === 'user').length}
+            </span>
+          )}
+        </button>
+      )}
+
+      {/* Chat Panel */}
+      {isOpen && (
+        <div className="fixed bottom-6 right-6 w-96 h-[600px] bg-white rounded-lg shadow-2xl z-50 flex flex-col border border-gray-200">
+          {/* Header */}
+          <div className="bg-gradient-to-r from-red-700 to-red-900 text-white p-4 rounded-t-lg flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <div className="bg-white/20 p-2 rounded-full">
+                <Sparkles className="h-4 w-4" />
+              </div>
+              <div>
+                <span className="font-semibold block">Hanco AI Assistant</span>
+                <span className="text-xs opacity-90">Powered by Gemini</span>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button 
+                onClick={clearChat}
+                className="hover:bg-white/20 rounded p-1 text-xs px-2"
+                title="Clear chat"
+              >
+                Clear
+              </button>
+              <button 
+                onClick={() => setIsOpen(false)} 
+                className="hover:bg-white/20 rounded p-1"
+                aria-label="Close chat"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-500 mt-8">
+                <div className="bg-white rounded-full p-4 w-16 h-16 mx-auto mb-4 flex items-center justify-center shadow-sm">
+                  <span className="text-3xl">🤖</span>
+                </div>
+                <p className="text-sm font-medium mb-1">👋 Hello! I'm Hanco AI</p>
+                <p className="text-xs">I can help you with:</p>
+                <div className="mt-3 space-y-1 text-xs">
+                  <p>• Vehicle pricing & availability</p>
+                  <p>• Booking information</p>
+                  <p>• General inquiries</p>
+                </div>
+              </div>
+            )}
+            
+            {messages.map((msg, idx) => (
+              <div
+                key={idx}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div className={`max-w-[85%] ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-bot'}`}>
+                  {renderMessageContent(msg)}
+                  <p className="text-xs opacity-60 mt-1">
+                    {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </p>
+                </div>
+              </div>
+            ))}
+            
+            {loading && (
+              <div className="flex justify-start">
+                <div className="chat-bubble-bot max-w-[85%]">
+                  <div className="flex space-x-1">
+                    <div className="w-2 h-2 bg-red-700 rounded-full animate-bounce"></div>
+                    <div className="w-2 h-2 bg-red-700 rounded-full animate-bounce delay-100"></div>
+                    <div className="w-2 h-2 bg-red-700 rounded-full animate-bounce delay-200"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input */}
+          <div className="p-4 border-t border-gray-200 bg-white rounded-b-lg">
+            <div className="flex space-x-2">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
+                placeholder="Ask me anything..."
+                className="input flex-1 text-sm"
+                disabled={loading}
+              />
+              <button
+                onClick={sendMessage}
+                disabled={loading || !input.trim()}
+                className="bg-red-700 text-white p-2 rounded-lg hover:bg-red-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Send message"
+              >
+                <Send className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2 text-center">
+              Powered by AI • May occasionally make mistakes
+            </p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
