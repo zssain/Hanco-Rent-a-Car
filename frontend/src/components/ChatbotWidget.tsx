@@ -82,7 +82,10 @@ export function ChatbotWidget() {
       
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
       
-      // Call Gemini-powered backend API
+      // Call Gemini-powered backend API with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      
       const response = await fetch(`${API_BASE_URL}/api/v1/chat/message`, {
         method: 'POST',
         headers: {
@@ -92,11 +95,15 @@ export function ChatbotWidget() {
         body: JSON.stringify({
           session_id: sessionId,
           message: input
-        })
+        }),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`API error: ${response.status} - ${errorText}`);
       }
 
       const data = await response.json();
@@ -117,9 +124,19 @@ export function ChatbotWidget() {
       }
     } catch (error) {
       console.error('Chat error:', error);
+      let errorMsg = '🧠 Sorry, I encountered an error connecting to my AI brain. Please try again or visit our Booking page directly.';
+      
+      if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+          errorMsg = '⏱️ Request timed out. The AI service might be starting up. Please try again in a moment.';
+        } else if (error.message.includes('Failed to fetch')) {
+          errorMsg = '🔌 Unable to connect to the backend service. Please check if the backend is running and try again.';
+        }
+      }
+      
       const errorMessage: Message = {
         role: 'assistant',
-        message: '🧠 Sorry, I encountered an error connecting to my AI brain. Please try again or visit our Booking page directly.',
+        message: errorMsg,
         timestamp: new Date()
       };
       const finalMessages = [...updatedMessages, errorMessage];

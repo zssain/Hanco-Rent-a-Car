@@ -59,6 +59,14 @@ export function Dashboard() {
         });
       } catch (error) {
         console.error('Error fetching dashboard:', error);
+        // Set default data on error
+        setDashboardData({
+          total_bookings: 0,
+          loyalty_points: 0,
+          saved_amount: 'SAR 0',
+          ai_bookings: 0,
+          recent_activity: []
+        });
       } finally {
         setLoading(false);
       }
