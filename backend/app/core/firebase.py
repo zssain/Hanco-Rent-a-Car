@@ -7,11 +7,6 @@ from firebase_admin import credentials, firestore, auth
 from typing import Optional, Dict, Any, List
 import logging
 from functools import lru_cache
-import json
-import os
-import base64
-
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,36 +30,18 @@ class FirebaseClient:
     def _initialize_firebase(self):
         """Initialize Firebase Admin SDK"""
         try:
-            # Priority 1: Load from Base64 encoded environment variable (safest for production)
-            firebase_creds_b64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
-            
-            if firebase_creds_b64:
-                logger.info("Loading Firebase credentials from Base64 environment variable")
-                cred_json = base64.b64decode(firebase_creds_b64).decode('utf-8')
-                cred_dict = json.loads(cred_json)
-                cred = credentials.Certificate(cred_dict)
-            else:
-                # Priority 2: Load from JSON environment variable
-                firebase_creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-                
-                if firebase_creds_json:
-                    logger.info("Loading Firebase credentials from JSON environment variable")
-                    cred_dict = json.loads(firebase_creds_json)
-                    cred = credentials.Certificate(cred_dict)
-                else:
-                    # Priority 3: Load from file path (for local development)
-                    logger.info(f"Loading Firebase credentials from file: {settings.FIREBASE_CREDENTIALS_PATH}")
-                    cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+            # Load Firebase credentials from file
+            cred_path = "app/firebase-key.json"
+            logger.info(f"Loading Firebase credentials from: {cred_path}")
+            cred = credentials.Certificate(cred_path)
             
             # Initialize Firebase app
-            firebase_admin.initialize_app(cred, {
-                'projectId': settings.FIREBASE_PROJECT_ID,
-            })
+            firebase_admin.initialize_app(cred)
             
             # Initialize Firestore client
             self._db = firestore.client()
             
-            logger.info(f"✅ Firebase initialized successfully for project: {settings.FIREBASE_PROJECT_ID}")
+            logger.info(f"✅ Firebase initialized successfully")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Firebase: {e}")

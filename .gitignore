@@ -40,6 +40,7 @@ build/
 # Firebase - Keep example files, ignore actual credentials
 firebase-service-account.json
 *-firebase-adminsdk-*.json
+firebase-key.json
 hanco-*.json
 
 # Secrets
