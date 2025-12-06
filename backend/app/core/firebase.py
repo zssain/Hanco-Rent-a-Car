@@ -9,6 +9,7 @@ import logging
 from functools import lru_cache
 import json
 import os
+import base64
 
 from app.core.config import settings
 
@@ -34,18 +35,26 @@ class FirebaseClient:
     def _initialize_firebase(self):
         """Initialize Firebase Admin SDK"""
         try:
-            # Load Firebase credentials from environment variable or file
-            firebase_creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            # Priority 1: Load from Base64 encoded environment variable (safest for production)
+            firebase_creds_b64 = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_B64")
             
-            if firebase_creds_json:
-                # Use JSON from environment variable (for production)
-                logger.info("Loading Firebase credentials from environment variable")
-                cred_dict = json.loads(firebase_creds_json)
+            if firebase_creds_b64:
+                logger.info("Loading Firebase credentials from Base64 environment variable")
+                cred_json = base64.b64decode(firebase_creds_b64).decode('utf-8')
+                cred_dict = json.loads(cred_json)
                 cred = credentials.Certificate(cred_dict)
             else:
-                # Use file path (for local development)
-                logger.info(f"Loading Firebase credentials from file: {settings.FIREBASE_CREDENTIALS_PATH}")
-                cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+                # Priority 2: Load from JSON environment variable
+                firebase_creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+                
+                if firebase_creds_json:
+                    logger.info("Loading Firebase credentials from JSON environment variable")
+                    cred_dict = json.loads(firebase_creds_json)
+                    cred = credentials.Certificate(cred_dict)
+                else:
+                    # Priority 3: Load from file path (for local development)
+                    logger.info(f"Loading Firebase credentials from file: {settings.FIREBASE_CREDENTIALS_PATH}")
+                    cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
             
             # Initialize Firebase app
             firebase_admin.initialize_app(cred, {
