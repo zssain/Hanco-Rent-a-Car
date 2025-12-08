@@ -162,6 +162,11 @@ async def health_check():
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
+# ==================== Vercel Handler ====================
+# Export app for Vercel serverless deployment
+handler = app
+
+
 # ==================== Run Application ====================
 if __name__ == "__main__":
     import uvicorn
