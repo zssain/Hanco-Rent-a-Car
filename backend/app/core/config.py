@@ -58,6 +58,8 @@ class Settings(BaseSettings):
         "https://hanco-ai.firebaseapp.com",
         "https://hanco-frontend.onrender.com",
         "https://hanco-backend.onrender.com",
+        "https://hanco-rent-a-car.vercel.app",
+        "https://hanco-rent-a-car-*.vercel.app",  # Preview deployments
     ]
     
     # ==================== Crawl4AI Settings ====================
