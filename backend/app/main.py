@@ -73,13 +73,46 @@ app = FastAPI(
 
 
 # ==================== CORS Middleware ====================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def is_allowed_origin(origin: str) -> bool:
+    """Check if origin is allowed"""
+    if origin in settings.ALLOWED_ORIGINS:
+        return True
+    # Allow all Vercel preview deployments
+    if origin.endswith('.vercel.app'):
+        return True
+    return False
+
+# Custom CORS middleware to handle dynamic origins
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+    
+    response = await call_next(request)
+    
+    if origin and is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
+
+# Handle preflight requests
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(request: Request, rest_of_path: str):
+    origin = request.headers.get("origin")
+    
+    if origin and is_allowed_origin(origin):
+        return JSONResponse(
+            content={},
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+    return JSONResponse(content={}, status_code=403)
 
 
 # ==================== Logging Middleware ====================
