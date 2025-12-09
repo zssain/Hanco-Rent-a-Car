@@ -31,11 +31,23 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Mock user to bypass Firebase authentication
+  const [user, setUser] = useState<User | null>({
+    uid: 'mock-user-123',
+    email: 'demo@hanco.com',
+    emailVerified: true,
+  } as User);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>({
+    uid: 'mock-user-123',
+    email: 'demo@hanco.com',
+    full_name: 'Demo User',
+    phone: '+1234567890',
+    role: 'customer',
+    is_active: true,
+  });
+  const [loading, setLoading] = useState(false);
 
-  // Fetch user profile from backend
+  // Fetch user profile from backend (disabled for demo mode)
   const fetchUserProfile = async (firebaseUser: User) => {
     try {
       const idToken = await firebaseUser.getIdToken();
@@ -50,20 +62,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // Disabled Firebase auth listener - using mock user for demo mode
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      
-      if (firebaseUser) {
-        await fetchUserProfile(firebaseUser);
-      } else {
-        setUserProfile(null);
-      }
-      
-      setLoading(false);
-    });
-
-    return unsubscribe;
+    // No Firebase authentication needed
+    // const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    //   setUser(firebaseUser);
+    //   if (firebaseUser) {
+    //     await fetchUserProfile(firebaseUser);
+    //   } else {
+    //     setUserProfile(null);
+    //   }
+    //   setLoading(false);
+    // });
+    // return unsubscribe;
   }, []);
 
   const login = async (email: string, password: string) => {

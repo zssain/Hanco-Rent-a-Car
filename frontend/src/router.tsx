@@ -19,51 +19,16 @@ export function AppRouter() {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        <Route index element={<Home />} />
+        <Route index element={<Dashboard />} />
         <Route path="login" element={<Login />} />
         <Route path="register" element={<Register />} />
         <Route path="vehicles" element={<Vehicles />} />
         <Route path="vehicles/:id" element={<VehicleDetails />} />
-        <Route
-          path="dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="booking/:id"
-          element={
-            <ProtectedRoute>
-              <Booking />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="my-bookings"
-          element={
-            <ProtectedRoute>
-              <MyBookings />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="payment"
-          element={
-            <ProtectedRoute>
-              <Payment />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="admin"
-          element={
-            <ProtectedRoute requireAdmin>
-              <Admin />
-            </ProtectedRoute>
-          }
-        />
+        <Route path="dashboard" element={<Dashboard />} />
+        <Route path="booking/:id" element={<Booking />} />
+        <Route path="my-bookings" element={<MyBookings />} />
+        <Route path="payment" element={<Payment />} />
+        <Route path="admin" element={<Admin />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
