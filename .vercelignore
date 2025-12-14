@@ -1,0 +1,21 @@
+# Ignore backend directory - deployed separately on Railway
+backend/
+hanco-backend-deploy/
+
+# Ignore backend files
+*.py
+requirements.txt
+Procfile
+railway.json
+
+# Ignore development files
+*.pyc
+__pycache__/
+.pytest_cache/
+*.log
+
+# Ignore data files
+*.csv
+*.db
+*.sqlite
+*.sqlite3
