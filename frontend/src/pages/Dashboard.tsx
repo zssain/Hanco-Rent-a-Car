@@ -31,7 +31,8 @@ export function Dashboard() {
 
   useEffect(() => {
     const fetchDashboard = async () => {
-      // Allow both authenticated users and guests to view dashboard
+  
+      
       try {
         setLoading(true);
         
@@ -73,7 +74,7 @@ export function Dashboard() {
     };
 
     fetchDashboard();
-  }, []); // Remove user dependency since guests can also use dashboard
+  }, [user]);
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
