@@ -4,7 +4,7 @@ Handles rental bookings lifecycle with Firestore integration
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from typing import Dict, Any, List, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 import logging
 import uuid
 
@@ -29,21 +29,39 @@ router = APIRouter()
 def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> Optional[BookingResponse]:
     """Convert Firestore document to BookingResponse schema"""
     try:
-        # Handle Firestore timestamps
+        # Handle Firestore timestamps - ensure timezone-aware datetimes
         created_at = doc_data.get('created_at')
         updated_at = doc_data.get('updated_at')
         
         if isinstance(created_at, datetime):
-            pass
+            # Make timezone-aware if naive
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
         elif hasattr(created_at, 'timestamp'):
-            created_at = datetime.fromtimestamp(created_at.timestamp())
+            created_at = datetime.fromtimestamp(created_at.timestamp(), tz=timezone.utc)
+        elif isinstance(created_at, str):
+            try:
+                created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+            except:
+                created_at = None
         else:
             created_at = None
             
         if isinstance(updated_at, datetime):
-            pass
+            # Make timezone-aware if naive
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
         elif hasattr(updated_at, 'timestamp'):
-            updated_at = datetime.fromtimestamp(updated_at.timestamp())
+            updated_at = datetime.fromtimestamp(updated_at.timestamp(), tz=timezone.utc)
+        elif isinstance(updated_at, str):
+            try:
+                updated_at = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+            except:
+                updated_at = None
         else:
             updated_at = None
         
@@ -381,8 +399,8 @@ async def list_user_bookings(
             if booking is not None:
                 bookings.append(booking)
         
-        # Sort by created_at (newest first)
-        bookings.sort(key=lambda x: x.created_at or datetime.min, reverse=True)
+        # Sort by created_at (newest first) - use timezone-aware datetime for comparison
+        bookings.sort(key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         
         # Apply pagination
         total = len(bookings)
