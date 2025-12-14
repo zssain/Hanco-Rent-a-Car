@@ -4,6 +4,7 @@ import { doc, getDoc, collection, addDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { pricingService } from '../services/pricingService';
+import { getOrCreateGuestId } from '@/utils/guestId';
 import { Calendar, CreditCard, MapPin, Car, CheckCircle } from 'lucide-react';
 
 export function Booking() {
@@ -82,9 +83,13 @@ export function Booking() {
         throw new Error('Price calculation failed');
       }
 
+      // Get or create guest ID for tracking
+      const guestId = getOrCreateGuestId();
+
       // Create booking in Firebase
       const bookingData = {
-        user_id: user?.uid || 'guest',
+        user_id: user?.uid || guestId,
+        guest_id: !user ? guestId : undefined, // Add guest_id for guest bookings
         vehicle_id: id,
         vehicle_name: vehicle.name,
         start_date: formData.startDate,
