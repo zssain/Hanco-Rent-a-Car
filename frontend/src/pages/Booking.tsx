@@ -21,7 +21,10 @@ export function Booking() {
     cardNumber: '',
     expiryDate: '',
     cvv: '',
-    cardName: ''
+    cardName: '',
+    guestName: '',
+    guestEmail: '',
+    guestPhone: ''
   });
   const [pricingResult, setPricingResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -73,9 +76,7 @@ export function Booking() {
     setError('');
 
     try {
-      if (!user) {
-        throw new Error('Please login to make a booking');
-      }
+      // Guest bookings are allowed - no authentication required
 
       if (!pricingResult) {
         throw new Error('Price calculation failed');
@@ -83,7 +84,7 @@ export function Booking() {
 
       // Create booking in Firebase
       const bookingData = {
-        user_id: user.uid,
+        user_id: user?.uid || 'guest',
         vehicle_id: id,
         vehicle_name: vehicle.name,
         start_date: formData.startDate,
@@ -95,6 +96,9 @@ export function Booking() {
         status: 'confirmed',
         payment_status: 'completed',
         payment_method: 'card',
+        guest_name: !user ? formData.guestName : undefined,
+        guest_email: !user ? formData.guestEmail : undefined,
+        guest_phone: !user ? formData.guestPhone : undefined,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       };
@@ -176,24 +180,6 @@ export function Booking() {
     return <div className="container-custom py-12 text-center">Loading...</div>;
   }
 
-  if (!user) {
-    return (
-      <div className="container-custom py-12">
-        <div className="max-w-2xl mx-auto text-center">
-          <div className="bg-red-50 border border-red-200 text-red-700 px-6 py-4 rounded-lg">
-            <p className="text-lg font-semibold mb-2">Please login to make a booking</p>
-            <button
-              onClick={() => navigate('/login')}
-              className="mt-4 bg-red-700 text-white px-6 py-2 rounded-lg hover:bg-red-800"
-            >
-              Go to Login
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="container-custom py-12">
       <h1 className="text-3xl font-bold mb-8">Complete Your Booking</h1>
@@ -204,6 +190,48 @@ export function Booking() {
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
                 {error}
+              </div>
+            )}
+
+            {/* Guest Information - only shown if not logged in */}
+            {!user && (
+              <div className="card">
+                <h2 className="text-xl font-semibold mb-4">Your Information</h2>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Full Name</label>
+                    <input
+                      type="text"
+                      className="input"
+                      placeholder="John Doe"
+                      required
+                      value={formData.guestName}
+                      onChange={(e) => setFormData({ ...formData, guestName: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Email</label>
+                    <input
+                      type="email"
+                      className="input"
+                      placeholder="john@example.com"
+                      required
+                      value={formData.guestEmail}
+                      onChange={(e) => setFormData({ ...formData, guestEmail: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Phone Number</label>
+                    <input
+                      type="tel"
+                      className="input"
+                      placeholder="+966 50 123 4567"
+                      required
+                      value={formData.guestPhone}
+                      onChange={(e) => setFormData({ ...formData, guestPhone: e.target.value })}
+                    />
+                  </div>
+                </div>
               </div>
             )}
 
