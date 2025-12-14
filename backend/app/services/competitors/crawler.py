@@ -468,12 +468,15 @@ async def scrape_all_providers(city: str, category: Optional[str] = None) -> Dic
 # ==================== LEGACY SUPPORT FUNCTIONS ====================
 # These maintain backward compatibility with existing API
 
-async def fetch_offers_for_provider(provider: str, city: str, crawler_config: Optional[CrawlerRunConfig] = None) -> List[Dict]:
+async def fetch_offers_for_provider(provider: str, city: str, crawler_config: Optional[Any] = None) -> List[Dict]:
     """
     Legacy function for backward compatibility.
     Use scrape_provider() instead.
+    
+    NOTE: crawl4ai is disabled, so this returns empty data.
     """
-    return await scrape_provider(provider, city)
+    logger.warning(f"fetch_offers_for_provider called but crawl4ai is disabled")
+    return []
 
 
 async def refresh_competitor_prices(
