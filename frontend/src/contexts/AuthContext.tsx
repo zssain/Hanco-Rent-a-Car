@@ -45,7 +45,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         uid: firebaseUser.uid,
         email: firebaseUser.email || '',
         full_name: firebaseUser.displayName || 'Guest User',
-        role: 'consumer'
+        role: 'consumer',
+        phone: '',
+        is_active: true
       });
     } catch (error) {
       console.error('Failed to fetch user profile:', error);
@@ -78,7 +80,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         uid: firebaseUser.uid,
         email: firebaseUser.email || '',
         full_name: firebaseUser.displayName || 'User',
-        role: 'consumer'
+        role: 'consumer',
+        phone: '',
+        is_active: true
       });
     } catch (error: any) {
       console.error('Login error:', error);

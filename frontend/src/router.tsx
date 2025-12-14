@@ -2,7 +2,7 @@ import { Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
 
 // Pages
-import { Home } from './pages/Home';
+// import { Home } from './pages/Home'; // Not used
 import { Dashboard } from './pages/Dashboard';
 import { Vehicles } from './pages/Vehicles';
 import { VehicleDetails } from './pages/VehicleDetails';

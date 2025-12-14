@@ -10,7 +10,7 @@ interface Message {
 }
 
 export function ChatbotWidget() {
-  const { user } = useAuth();
+  const { } = useAuth(); // user removed - not used
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
