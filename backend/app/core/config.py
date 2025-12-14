@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = Field(default="http://localhost:5173", env="FRONTEND_URL")
     # ALLOWED_ORIGINS can be set as comma-separated list in environment
     # Example: ALLOWED_ORIGINS="http://localhost:5173,https://yourdomain.com"
-    ALLOWED_ORIGINS: List[str] = Field(
-        default=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"],
+    ALLOWED_ORIGINS: Union[str, List[str]] = Field(
+        default=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://51.21.130.26"],
         env="ALLOWED_ORIGINS"
     )
     
@@ -88,7 +88,9 @@ class Settings(BaseSettings):
                 pass
             # Fall back to comma-separated string
             return [origin.strip() for origin in v.split(',') if origin.strip()]
-        return v
+        if isinstance(v, list):
+            return v
+        return [str(v)]
     
     class Config:
         env_file = ".env"
