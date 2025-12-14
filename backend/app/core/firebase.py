@@ -36,6 +36,10 @@ class FirebaseClient:
         """
         import os
         import json
+        from dotenv import load_dotenv
+        
+        # Load .env file to make environment variables available
+        load_dotenv()
         
         try:
             # Method 1: Try GOOGLE_APPLICATION_CREDENTIALS (standard for GCP/AWS)
@@ -95,6 +99,7 @@ class Collections:
     USERS = "users"
     VEHICLES = "vehicles"
     BOOKINGS = "bookings"
+    BRANCHES = "branches"
     CHAT_SESSIONS = "chat_sessions"
     CHAT_MESSAGES = "chat_messages"
     PAYMENTS = "payments"

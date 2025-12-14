@@ -39,12 +39,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Fetch user profile from backend
   const fetchUserProfile = async (firebaseUser: User) => {
     try {
-      const idToken = await firebaseUser.getIdToken();
-      const response = await api.post('/api/v1/auth/login', {
-        email: firebaseUser.email,
-        password: idToken, // Backend expects ID token in password field
+      // GUEST MODE: Backend auth endpoints removed
+      // Just set a basic profile from Firebase user data
+      setUserProfile({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || '',
+        full_name: firebaseUser.displayName || 'Guest User',
+        role: 'consumer'
       });
-      setUserProfile(response.data);
     } catch (error) {
       console.error('Failed to fetch user profile:', error);
       setUserProfile(null);
@@ -71,14 +73,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const firebaseUser = userCredential.user;
       
-      // Get ID token and sync with backend
-      const idToken = await firebaseUser.getIdToken();
-      const response = await api.post('/api/v1/auth/login', {
-        email: firebaseUser.email,
-        password: idToken,
+      // GUEST MODE: No backend sync, just use Firebase user
+      setUserProfile({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || '',
+        full_name: firebaseUser.displayName || 'User',
+        role: 'consumer'
       });
-      
-      setUserProfile(response.data);
     } catch (error: any) {
       console.error('Login error:', error);
       throw new Error(error.response?.data?.detail || error.message || 'Login failed');

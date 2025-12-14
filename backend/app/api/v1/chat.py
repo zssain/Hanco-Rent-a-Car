@@ -10,8 +10,8 @@ import uuid
 import logging
 
 from app.core.firebase import db
-from app.core.security import get_current_user, get_current_user_optional
-from app.services.chatbot.orchestrator import handle_message
+from app.core.security import get_guest_id
+from app.services.chatbot.orchestrator import orchestrator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class ConversationHistory(BaseModel):
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_message(
     request: ChatMessageRequest,
-    current_user: Optional[Dict] = Depends(get_current_user_optional)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Send a message to the chatbot
@@ -72,31 +72,27 @@ async def send_message(
     - **message**: User's message (max 2000 characters)
     
     Returns the assistant's reply with detected intent and extracted information.
-    Authentication is optional - chatbot works for both authenticated and anonymous users.
+    Requires X-Guest-Id header.
     """
     try:
         # Generate session ID if not provided
         session_id = request.session_id or str(uuid.uuid4())
         
-        # Use anonymous user if not authenticated
-        user_data = current_user or {'uid': 'anonymous', 'email': 'anonymous@hanco.ai'}
-        
-        logger.info(f"Processing chat message for user {user_data.get('uid')}, session {session_id}")
+        logger.info(f"Processing chat message for guest {guest_id}, session {session_id}")
         
         # Call orchestrator
-        result = await handle_message(
-            session_id=session_id,
+        result = await orchestrator.handle_message(
             user_message=request.message,
-            user=user_data,
-            firestore_client=db
+            session_id=session_id,
+            guest_id=guest_id
         )
         
         return ChatMessageResponse(
             session_id=result['session_id'],
             reply=result['reply'],
-            intent=result['intent'],
-            extracted=result.get('extracted', {}),
-            pricing_info=result.get('pricing_info'),
+            intent=result.get('state', 'unknown'),
+            extracted={},
+            pricing_info=result.get('data'),
             timestamp=datetime.utcnow().isoformat()
         )
         
@@ -110,7 +106,7 @@ async def send_message(
 
 @router.get("/sessions", response_model=List[ChatSession])
 async def get_user_sessions(
-    current_user: Dict = Depends(get_current_user),
+    guest_id: str = Depends(get_guest_id),
     limit: int = 20
 ):
     """
@@ -121,12 +117,10 @@ async def get_user_sessions(
     Returns list of chat sessions ordered by last activity
     """
     try:
-        user_id = current_user.get('uid')
-        
         # Query user's sessions
         sessions_ref = db.collection('chat_sessions')
         sessions_query = sessions_ref\
-            .where('user_id', '==', user_id)\
+            .where('guest_id', '==', guest_id)\
             .order_by('last_activity', direction='DESCENDING')\
             .limit(limit)\
             .stream()
@@ -157,7 +151,7 @@ async def get_user_sessions(
                 created_at=created_at_str
             ))
         
-        logger.info(f"Retrieved {len(sessions)} sessions for user {user_id}")
+        logger.info(f"Retrieved {len(sessions)} sessions for guest {guest_id}")
         
         return sessions
         
@@ -172,7 +166,7 @@ async def get_user_sessions(
 @router.get("/sessions/{session_id}", response_model=ConversationHistory)
 async def get_conversation_history(
     session_id: str,
-    current_user: Dict = Depends(get_current_user),
+    guest_id: str = Depends(get_guest_id),
     limit: int = 50
 ):
     """
@@ -243,7 +237,7 @@ async def get_conversation_history(
 @router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: str,
-    current_user: Dict = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Delete a chat session (soft delete - marks as deleted)

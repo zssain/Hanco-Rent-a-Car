@@ -11,6 +11,10 @@ class BookingBase(BaseModel):
     vehicle_id: str
     start_date: date
     end_date: date
+    pickup_branch_id: str
+    dropoff_branch_id: str
+    insurance_selected: bool = False
+    payment_mode: str = Field(default="cash", pattern=r'^(cash|card)$')
     
     @validator('end_date')
     def validate_dates(cls, v, values):
@@ -27,8 +31,7 @@ class BookingBase(BaseModel):
 
 class BookingCreate(BookingBase):
     """Create booking request"""
-    pickup_location: Optional[str] = None
-    dropoff_location: Optional[str] = None
+    pass
 
 
 class BookingUpdate(BaseModel):
@@ -42,12 +45,11 @@ class BookingUpdate(BaseModel):
 class BookingResponse(BookingBase):
     """Booking response with additional fields"""
     id: str
-    user_id: str
+    guest_id: str
     total_price: float
+    insurance_amount: float
     status: str
     payment_status: str
-    pickup_location: Optional[str] = None
-    dropoff_location: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -65,7 +67,7 @@ class BookingListResponse(BaseModel):
 
 class BookingSearchRequest(BaseModel):
     """Booking search/filter request"""
-    user_id: Optional[str] = None
+    guest_id: Optional[str] = None
     vehicle_id: Optional[str] = None
     status: Optional[str] = None
     payment_status: Optional[str] = None

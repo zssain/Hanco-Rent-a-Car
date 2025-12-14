@@ -76,9 +76,17 @@ class Settings(BaseSettings):
     @field_validator('ALLOWED_ORIGINS', mode='before')
     @classmethod
     def parse_allowed_origins(cls, v):
-        """Parse ALLOWED_ORIGINS from CSV string or list"""
+        """Parse ALLOWED_ORIGINS from CSV string, JSON array string, or list"""
         if isinstance(v, str):
-            # Parse comma-separated string
+            # Try to parse as JSON array first
+            import json
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # Fall back to comma-separated string
             return [origin.strip() for origin in v.split(',') if origin.strip()]
         return v
     
@@ -86,6 +94,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = True
+        extra = "ignore"  # Allow extra fields in .env file (like GOOGLE_APPLICATION_CREDENTIALS)
 
 
 @lru_cache()

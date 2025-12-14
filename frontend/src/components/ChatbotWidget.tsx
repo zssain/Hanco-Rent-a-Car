@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { MessageCircle, X, Send, Sparkles } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { getOrCreateGuestId } from '../utils/guestId';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -77,8 +78,8 @@ export function ChatbotWidget() {
     setLoading(true);
 
     try {
-      // Get Firebase auth token
-      const token = user ? await user.getIdToken() : '';
+      // Get guest ID for authentication
+      const guestId = getOrCreateGuestId();
       
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
       
@@ -90,7 +91,7 @@ export function ChatbotWidget() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'X-Guest-Id': guestId
         },
         body: JSON.stringify({
           session_id: sessionId,

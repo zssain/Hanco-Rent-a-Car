@@ -9,14 +9,13 @@ import logging
 import uuid
 
 from app.core.firebase import db, Collections
-from app.core.security import get_current_user, require_admin
+from app.core.security import get_guest_id_optional, get_guest_id
 from app.schemas.vehicle import (
     VehicleCreate,
     VehicleUpdate,
     VehicleResponse,
     VehicleListResponse
 )
-from app.schemas.auth import UserResponse
 from google.cloud.firestore_v1 import FieldFilter
 from google.cloud import firestore
 
@@ -194,7 +193,7 @@ async def get_vehicle(vehicle_id: str):
 @router.post("", response_model=VehicleResponse, status_code=status.HTTP_201_CREATED)
 async def create_vehicle(
     vehicle: VehicleCreate,
-    current_user: UserResponse = Depends(require_admin)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Create a new vehicle (Admin only)
@@ -225,7 +224,7 @@ async def create_vehicle(
         doc_ref = db.collection(Collections.VEHICLES).document(vehicle_id)
         doc_ref.set(vehicle_data)
         
-        logger.info(f"Vehicle created: {vehicle_id} by admin {current_user.uid}")
+        logger.info(f"Vehicle created: {vehicle_id} by guest {guest_id}")
         
         # Fetch the created document to get server timestamps
         created_doc = doc_ref.get()
@@ -243,7 +242,7 @@ async def create_vehicle(
 async def update_vehicle(
     vehicle_id: str,
     vehicle_update: VehicleUpdate,
-    current_user: UserResponse = Depends(require_admin)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Update vehicle details (Admin only)
@@ -297,7 +296,7 @@ async def update_vehicle(
         # Update document
         doc_ref.update(update_data)
         
-        logger.info(f"Vehicle updated: {vehicle_id} by admin {current_user.uid}")
+        logger.info(f"Vehicle updated: {vehicle_id} by guest {guest_id}")
         
         # Fetch updated document
         updated_doc = doc_ref.get()
@@ -316,7 +315,7 @@ async def update_vehicle(
 @router.delete("/{vehicle_id}", status_code=status.HTTP_200_OK)
 async def delete_vehicle(
     vehicle_id: str,
-    current_user: UserResponse = Depends(require_admin),
+    guest_id: str = Depends(get_guest_id),
     hard_delete: bool = Query(False, description="Permanently delete (default: soft delete)")
 ):
     """
@@ -343,7 +342,7 @@ async def delete_vehicle(
         if hard_delete:
             # Permanent deletion
             doc_ref.delete()
-            logger.warning(f"Vehicle permanently deleted: {vehicle_id} by admin {current_user.uid}")
+            logger.warning(f"Vehicle permanently deleted: {vehicle_id} by guest {guest_id}")
             return {
                 "message": f"Vehicle {vehicle_id} permanently deleted",
                 "deleted": True,
@@ -355,7 +354,7 @@ async def delete_vehicle(
                 'status': 'inactive',
                 'updated_at': firestore.SERVER_TIMESTAMP
             })
-            logger.info(f"Vehicle soft deleted: {vehicle_id} by admin {current_user.uid}")
+            logger.info(f"Vehicle soft deleted: {vehicle_id} by guest {guest_id}")
             return {
                 "message": f"Vehicle {vehicle_id} deactivated (soft delete)",
                 "deleted": True,

@@ -9,7 +9,7 @@ from datetime import datetime
 import logging
 
 from app.core.firebase import db, Collections
-from app.core.security import get_current_user, require_admin
+from app.core.security import get_guest_id_optional
 from app.services.competitors.crawler import (
     refresh_competitor_prices,
     get_supported_cities,
@@ -223,13 +223,13 @@ async def get_supported_options():
     "/refresh",
     response_model=RefreshResponse,
     summary="Refresh competitor prices",
-    description="Scrape competitor websites and update prices (Admin only)",
-    dependencies=[Depends(require_admin)]
+    description="Scrape competitor websites and update prices",
+    
 )
 async def refresh_prices(
     request: RefreshRequest,
     background_tasks: BackgroundTasks,
-    current_user=Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id_optional)
 ):
     """
     Refresh competitor prices by scraping provider websites.
@@ -282,12 +282,12 @@ async def refresh_prices(
 @router.delete(
     "/cleanup",
     summary="Cleanup old prices",
-    description="Delete competitor prices older than specified days (Admin only)",
-    dependencies=[Depends(require_admin)]
+    description="Delete competitor prices older than specified days",
+    
 )
 async def cleanup_prices(
     days_old: int = Query(7, ge=1, le=365, description="Delete prices older than this"),
-    current_user=Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id_optional)
 ):
     """
     Delete old competitor prices from database.

@@ -8,7 +8,7 @@ from typing import Optional
 import logging
 
 from app.core.firebase import db
-from app.core.security import get_current_user, verify_payment_ownership, safe_log_error, redact_sensitive_data
+from app.core.security import get_guest_id, verify_payment_ownership, safe_log_error, redact_sensitive_data
 from app.core.config import settings
 from app.schemas.auth import UserResponse
 from app.services.payments.simulator import process_payment, mark_booking_paid
@@ -66,7 +66,7 @@ class PaymentResponse(BaseModel):
 @router.post("/pay", response_model=PaymentResponse, status_code=status.HTTP_200_OK)
 async def pay_for_booking(
     request: PaymentRequest,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Process payment for a booking
@@ -76,7 +76,7 @@ async def pay_for_booking(
     
     Args:
         request: Payment request with booking_id and card details
-        current_user: Authenticated user (from token)
+        guest_id: Guest UUID from X-Guest-Id header
         
     Returns:
         Payment response with transaction details
@@ -111,8 +111,8 @@ async def pay_for_booking(
         
         booking_data = booking_doc.to_dict()
         
-        # IDOR protection: Ensure user owns this booking before allowing payment
-        if booking_data.get('user_id') != current_user.uid and current_user.role != 'admin':
+        # IDOR protection: Ensure guest owns this booking before allowing payment
+        if booking_data.get('guest_id') != guest_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Booking not found"  # Return 404 to prevent ID enumeration
@@ -177,7 +177,7 @@ async def pay_for_booking(
         # Store payment record in Firestore (NEVER store full card numbers or CVV)
         payment_record = {
             'booking_id': request.booking_id,
-            'user_id': current_user.uid,  # Track which user made the payment
+            'guest_id': guest_id,  # Track which guest made the payment
             'transaction_id': payment_result['transaction_id'],
             'amount': total_price,
             'currency': 'SAR',
@@ -217,17 +217,16 @@ async def pay_for_booking(
 @router.get("/{transaction_id}", status_code=status.HTTP_200_OK)
 async def get_payment_details(
     transaction_id: str,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Get payment details by transaction ID
     
-    Users can only view their own payments.
-    Admins can view any payment.
+    Guests can only view their own payments.
     
     Args:
         transaction_id: Transaction ID
-        current_user: Authenticated user
+        guest_id: Guest UUID from X-Guest-Id header
         
     Returns:
         Payment record details
@@ -237,7 +236,7 @@ async def get_payment_details(
     """
     try:
         # IDOR protection via helper function
-        await verify_payment_ownership(transaction_id, current_user)
+        await verify_payment_ownership(transaction_id, guest_id)
         payment_ref = db.collection('payments').document(transaction_id)
         payment_doc = payment_ref.get()
         

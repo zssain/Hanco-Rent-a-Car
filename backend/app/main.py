@@ -141,45 +141,15 @@ async def add_security_headers(request: Request, call_next):
 
 
 # ==================== CORS Middleware ====================
-def is_allowed_origin(origin: str) -> bool:
-    """Check if origin is allowed"""
-    return origin in settings.ALLOWED_ORIGINS
-
-# Custom CORS middleware with strict controls
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
-    
-    response = await call_next(request)
-    
-    if origin and is_allowed_origin(origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        # Restrict methods to only what's needed
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        # Restrict headers to only what's needed
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
-        response.headers["Access-Control-Max-Age"] = "600"  # 10 minutes
-    
-    return response
-
-# Handle preflight requests
-@app.options("/{rest_of_path:path}")
-async def preflight_handler(request: Request, rest_of_path: str):
-    origin = request.headers.get("origin")
-    
-    if origin and is_allowed_origin(origin):
-        return JSONResponse(
-            content={},
-            headers={
-                "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization, Accept",
-                "Access-Control-Max-Age": "600",
-            }
-        )
-    return JSONResponse(content={"detail": "Origin not allowed"}, status_code=403)
+# Use FastAPI's built-in CORS middleware for better compatibility
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Guest-Id"],
+    max_age=600,
+)
 
 
 # ==================== Logging Middleware ====================

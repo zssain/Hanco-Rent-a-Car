@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import api from '@/lib/api';
+import { getOrCreateGuestId } from '@/utils/guestId';
 
 interface BookingActivity {
   id: string;
@@ -36,15 +36,16 @@ export function Dashboard() {
       try {
         setLoading(true);
         
-        // Fetch bookings from Firebase
-        const bookingsRef = collection(db, 'bookings');
-        const q = query(bookingsRef, where('user_id', '==', user.uid));
-        const snapshot = await getDocs(q);
+        const guestId = getOrCreateGuestId();
         
-        const bookingsData = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
+        // Fetch bookings from backend API
+        const response = await api.get('/api/v1/bookings', {
+          headers: {
+            'X-Guest-Id': guestId
+          }
+        });
+        
+        const bookingsData = response.data.bookings || [];
         
         const totalBookings = bookingsData.length;
         const totalSpent = bookingsData.reduce((sum: number, b: any) => sum + (b.total_price || 0), 0);
@@ -54,7 +55,7 @@ export function Dashboard() {
           total_bookings: totalBookings,
           loyalty_points: totalBookings * 10,
           saved_amount: `SAR ${savedAmount.toFixed(0)}`,
-          ai_bookings: 0, // TODO: Track chatbot bookings
+          ai_bookings: bookingsData.filter((b: any) => b.guest_id).length, // Count guest bookings from chatbot
           recent_activity: bookingsData.slice(0, 5)
         });
       } catch (error) {

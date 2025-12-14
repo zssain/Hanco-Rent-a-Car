@@ -1,20 +1,69 @@
 """
 Security utilities for Hanco-AI
-Authentication, authorization, token validation, IDOR protection
+Guest ID validation, IDOR protection, log redaction
 """
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, status, Request, Header
 from typing import Optional, Dict, Any
 from google.cloud import firestore
 import logging
 import re
+import uuid
 
-from app.core.firebase import verify_id_token, get_user, db, Collections
+from app.core.firebase import db, Collections
 
 logger = logging.getLogger(__name__)
 
-# HTTP Bearer token scheme for authentication
-security = HTTPBearer()
+
+# ==================== Guest ID Management ====================
+
+async def get_guest_id(
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id")
+) -> str:
+    """
+    Extract and validate guest ID from X-Guest-Id header.
+    
+    Args:
+        x_guest_id: Guest UUID from request header
+        
+    Returns:
+        Validated guest ID string
+        
+    Raises:
+        HTTPException: If guest ID is missing or invalid
+    """
+    if not x_guest_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-Guest-Id header is required"
+        )
+    
+    # Validate UUID format
+    try:
+        uuid.UUID(x_guest_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid guest ID format"
+        )
+    
+    return x_guest_id
+
+
+async def get_guest_id_optional(
+    x_guest_id: Optional[str] = Header(None, alias="X-Guest-Id")
+) -> Optional[str]:
+    """
+    Optional guest ID extraction.
+    Returns None if header is missing or invalid.
+    """
+    if not x_guest_id:
+        return None
+    
+    try:
+        uuid.UUID(x_guest_id)
+        return x_guest_id
+    except ValueError:
+        return None
 
 
 # ==================== Log Redaction ====================
@@ -40,8 +89,8 @@ def redact_sensitive_data(text: str) -> str:
     text = re.sub(r'\b(AIza[0-9A-Za-z_-]{35})\b', '[API_KEY_REDACTED]', text)
     text = re.sub(r'\b(sk-[a-zA-Z0-9]{48})\b', '[API_KEY_REDACTED]', text)
     
-    # Redact phone numbers
-    text = re.sub(r'\b\+?[\d\s-()]{10,15}\b', '[PHONE_REDACTED]', text)
+    # Redact phone numbers (escape dash to avoid regex range error)
+    text = re.sub(r'\b\+?[\d\s()\-]{10,15}\b', '[PHONE_REDACTED]', text)
     
     return text
 
@@ -53,150 +102,11 @@ def safe_log_error(message: str, error: Exception):
     logger.error(f"{safe_message}: {safe_error}")
 
 
-# ==================== Authentication ====================
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> Dict[str, Any]:
-    """
-    Dependency to get current authenticated user from Firebase ID token.
-    
-    Args:
-        credentials: HTTP Bearer token from Authorization header
-        
-    Returns:
-        User data dictionary including uid, email, role
-        
-    Raises:
-        HTTPException: If token is invalid or user not found
-    """
-    try:
-        # Extract token from credentials
-        token = credentials.credentials
-        
-        # Verify Firebase ID token
-        decoded_token = verify_id_token(token)
-        uid = decoded_token.get('uid')
-        
-        if not uid:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials"
-            )
-        
-        # Get user data from Firestore
-        user_data = get_user(uid)
-        
-        if not user_data:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials"
-            )
-        
-        # Check if user is active
-        if not user_data.get('is_active', True):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account is inactive"
-            )
-        
-        # Add custom claims from token (role)
-        user_data['role'] = decoded_token.get('role', user_data.get('role', 'consumer'))
-        user_data['uid'] = uid
-        
-        return user_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        safe_log_error("Authentication failed", e)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials"
-        )
-
-
-async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
-) -> Optional[Dict[str, Any]]:
-    """
-    Optional authentication dependency.
-    Returns user if authenticated, None otherwise.
-    """
-    if not credentials:
-        return None
-    
-    try:
-        token = credentials.credentials
-        decoded_token = verify_id_token(token)
-        uid = decoded_token.get('uid')
-        
-        if uid:
-            user_data = get_user(uid)
-            if user_data:
-                user_data['role'] = decoded_token.get('role', user_data.get('role', 'consumer'))
-                user_data['uid'] = uid
-                return user_data
-    except Exception as e:
-        logger.debug(f"Optional auth failed: {e}")
-    
-    return None
-
-
-# ==================== Authorization ====================
-
-async def require_admin(
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Dependency that requires user to have admin role.
-    
-    Args:
-        current_user: Current authenticated user
-        
-    Returns:
-        User data if user is admin
-        
-    Raises:
-        HTTPException: If user is not admin
-    """
-    user_role = current_user.get('role', 'consumer')
-    
-    if user_role not in ['admin', 'support']:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient permissions"
-        )
-    
-    return current_user
-
-
-def require_role(allowed_roles: list):
-    """
-    Factory function to create role-based dependency.
-    
-    Usage:
-        @router.get("/", dependencies=[Depends(require_role(['admin', 'support']))])
-    """
-    async def role_checker(current_user: Dict[str, Any] = Depends(get_current_user)):
-        user_role = current_user.get('role', 'consumer')
-        
-        if user_role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
-            )
-        
-        return current_user
-    
-    return role_checker
-
-
 # ==================== IDOR Protection ====================
 
 async def verify_booking_ownership(
     booking_id: str,
-    current_user: Dict[str, Any]
+    guest_id: str
 ) -> Dict[str, Any]:
     """
     Verify that the current user owns the booking or is an admin.
@@ -250,20 +160,20 @@ async def verify_booking_ownership(
 
 async def verify_payment_ownership(
     payment_id: str,
-    current_user: Dict[str, Any]
+    guest_id: str
 ) -> Dict[str, Any]:
     """
-    Verify that the current user owns the payment or is an admin.
+    Verify that a payment belongs to the specified guest.
     
     Args:
         payment_id: Payment/Transaction ID to check
-        current_user: Current authenticated user
+        guest_id: Guest UUID
         
     Returns:
         Payment data if authorized
         
     Raises:
-        HTTPException: If payment not found or user not authorized
+        HTTPException: If payment not found or access denied
     """
     try:
         payment_ref = db.collection('payments').document(payment_id)
@@ -276,14 +186,9 @@ async def verify_payment_ownership(
             )
         
         payment_data = payment_doc.to_dict()
-        user_role = current_user.get('role', 'consumer')
         
-        # Admin can access any payment
-        if user_role in ['admin', 'support']:
-            return payment_data
-        
-        # Regular user can only access their own payments
-        if payment_data.get('user_id') != current_user.get('uid'):
+        # Verify ownership
+        if payment_data.get('guest_id') != guest_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Resource not found"
@@ -388,10 +293,6 @@ def get_client_ip(request: Request) -> str:
 
 
 # ==================== Legacy Functions (kept for compatibility) ====================
-        
-        return current_user
-    
-    return role_checker
 
 
 def verify_user_access(user_id: str, current_user: Dict[str, Any]) -> bool:

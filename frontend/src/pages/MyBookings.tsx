@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, query, where, getDocs, deleteDoc, doc } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
-import { useAuth } from '../contexts/AuthContext';
 import { Calendar, MapPin, Car, Trash2, AlertCircle } from 'lucide-react';
+import api from '@/lib/api';
+import { getOrCreateGuestId } from '@/utils/guestId';
 
 interface Booking {
   id: string;
@@ -20,32 +19,25 @@ interface Booking {
 
 export function MyBookings() {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     fetchBookings();
-  }, [user]);
+  }, []);
 
   const fetchBookings = async () => {
     try {
-      if (!user) {
-        setBookings([]);
-        setLoading(false);
-        return;
-      }
-
-      const bookingsRef = collection(db, 'bookings');
-      const q = query(bookingsRef, where('user_id', '==', user.uid));
-      const snapshot = await getDocs(q);
+      const guestId = getOrCreateGuestId();
       
-      const bookingsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Booking[];
+      const response = await api.get('/api/v1/bookings', {
+        headers: {
+          'X-Guest-Id': guestId
+        }
+      });
       
+      const bookingsData = response.data.bookings || [];
       setBookings(bookingsData);
     } catch (err: any) {
       console.error('Error fetching bookings:', err);
@@ -61,7 +53,14 @@ export function MyBookings() {
     }
 
     try {
-      await deleteDoc(doc(db, 'bookings', bookingId));
+      const guestId = getOrCreateGuestId();
+      
+      await api.delete(`/api/v1/bookings/${bookingId}`, {
+        headers: {
+          'X-Guest-Id': guestId
+        }
+      });
+      
       setBookings(bookings.filter(b => b.id !== bookingId));
     } catch (err: any) {
       alert('Failed to cancel booking');

@@ -5,18 +5,18 @@ Aggregates all v1 endpoints
 from fastapi import APIRouter
 
 # Import all endpoint routers
-from app.api.v1 import auth, vehicles, bookings, pricing, competitors, payments, chat
+from app.api.v1 import vehicles, bookings, pricing, competitors, payments, chat, branches
 
 # Create main API router
 api_router = APIRouter()
 
 # ==================== Router Registration ====================
 
-# Authentication endpoints
+# Branch locations endpoints
 api_router.include_router(
-    auth.router,
-    prefix="/auth",
-    tags=["Authentication"]
+    branches.router,
+    prefix="/branches",
+    tags=["Branches"]
 )
 
 # Vehicle management endpoints

@@ -13,13 +13,18 @@ class Booking:
     """Booking model for Firestore storage"""
     
     id: str
-    user_id: str
+    guest_id: str
     vehicle_id: str
     start_date: date
     end_date: date
+    pickup_branch_id: str
+    dropoff_branch_id: str
+    insurance_selected: bool
     total_price: float
+    insurance_amount: float = 0.0
     status: str = "pending"  # pending, confirmed, active, completed, cancelled
     payment_status: str = "pending"  # pending, completed, refunded, failed
+    payment_mode: str = "cash"  # cash, card
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -27,13 +32,18 @@ class Booking:
         """Convert model to Firestore-compatible dictionary"""
         data = {
             'id': self.id,
-            'user_id': self.user_id,
+            'guest_id': self.guest_id,
             'vehicle_id': self.vehicle_id,
             'start_date': self.start_date.isoformat() if isinstance(self.start_date, date) else self.start_date,
             'end_date': self.end_date.isoformat() if isinstance(self.end_date, date) else self.end_date,
+            'pickup_branch_id': self.pickup_branch_id,
+            'dropoff_branch_id': self.dropoff_branch_id,
+            'insurance_selected': self.insurance_selected,
             'total_price': self.total_price,
+            'insurance_amount': self.insurance_amount,
             'status': self.status,
             'payment_status': self.payment_status,
+            'payment_mode': self.payment_mode,
         }
         
         if self.created_at:

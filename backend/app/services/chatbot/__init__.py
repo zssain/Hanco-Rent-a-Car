@@ -1,6 +1,6 @@
 """
 Chatbot services package
 """
-from .orchestrator import handle_message
+from .orchestrator import orchestrator
 
-__all__ = ['handle_message']
+__all__ = ['orchestrator']

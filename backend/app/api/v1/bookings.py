@@ -9,14 +9,13 @@ import logging
 import uuid
 
 from app.core.firebase import db, Collections
-from app.core.security import get_current_user, require_admin, verify_booking_ownership, safe_log_error
+from app.core.security import get_guest_id, verify_booking_ownership, safe_log_error
 from app.schemas.booking import (
     BookingCreate,
     BookingUpdate,
     BookingResponse,
     BookingListResponse
 )
-from app.schemas.auth import UserResponse
 from google.cloud.firestore_v1 import FieldFilter
 from google.cloud import firestore
 
@@ -27,7 +26,7 @@ router = APIRouter()
 
 # ==================== Helper Functions ====================
 
-def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> BookingResponse:
+def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> Optional[BookingResponse]:
     """Convert Firestore document to BookingResponse schema"""
     try:
         # Handle Firestore timestamps
@@ -52,32 +51,49 @@ def booking_doc_to_response(doc_id: str, doc_data: Dict[str, Any]) -> BookingRes
         start_date = doc_data.get('start_date')
         end_date = doc_data.get('end_date')
         
-        if isinstance(start_date, str):
-            start_date = datetime.fromisoformat(start_date).date()
-        elif hasattr(start_date, 'date'):
-            start_date = start_date.date()
+        try:
+            if isinstance(start_date, str):
+                start_date = datetime.fromisoformat(start_date).date()
+            elif hasattr(start_date, 'date'):
+                start_date = start_date.date()
+            elif start_date is None:
+                start_date = date.today()
+        except:
+            start_date = date.today()
             
-        if isinstance(end_date, str):
-            end_date = datetime.fromisoformat(end_date).date()
-        elif hasattr(end_date, 'date'):
-            end_date = end_date.date()
+        try:
+            if isinstance(end_date, str):
+                end_date = datetime.fromisoformat(end_date).date()
+            elif hasattr(end_date, 'date'):
+                end_date = end_date.date()
+            elif end_date is None:
+                end_date = date.today()
+        except:
+            end_date = date.today()
+        
+        # Get guest_id from either field
+        guest_id = doc_data.get('guest_id') or doc_data.get('user_id') or 'unknown'
         
         return BookingResponse(
             id=doc_id,
-            user_id=doc_data.get('user_id'),
-            vehicle_id=doc_data.get('vehicle_id'),
+            guest_id=guest_id,
+            vehicle_id=doc_data.get('vehicle_id', 'unknown'),
             start_date=start_date,
             end_date=end_date,
-            total_price=doc_data.get('total_price', 0.0),
+            pickup_branch_id=doc_data.get('pickup_branch_id') or doc_data.get('pickup_location', ''),
+            dropoff_branch_id=doc_data.get('dropoff_branch_id') or doc_data.get('dropoff_location', ''),
+            insurance_selected=doc_data.get('insurance_selected', False),
+            payment_mode=doc_data.get('payment_mode', 'cash'),
+            total_price=float(doc_data.get('total_price', 0.0)),
+            insurance_amount=float(doc_data.get('insurance_amount', 0.0)),
             status=doc_data.get('status', 'pending'),
             payment_status=doc_data.get('payment_status', 'pending'),
-            pickup_location=doc_data.get('pickup_location'),
-            dropoff_location=doc_data.get('dropoff_location'),
             created_at=created_at,
             updated_at=updated_at
         )
     except Exception as e:
-        logger.error(f"Error converting booking document: {str(e)}")
+        logger.error(f"Error converting booking document {doc_id}: {str(e)}, data: {doc_data}")
+        return None  # Return None for invalid bookings
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing booking data: {str(e)}"
@@ -201,7 +217,7 @@ async def calculate_booking_price(vehicle_id: str, start_date: date, end_date: d
 @router.post("", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
 async def create_booking(
     booking: BookingCreate,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Create a new booking
@@ -254,7 +270,7 @@ async def create_booking(
         # Prepare booking data
         booking_data = {
             'id': booking_id,
-            'user_id': current_user.uid,
+            'user_id': guest_id,
             'vehicle_id': booking.vehicle_id,
             'start_date': booking.start_date.isoformat(),
             'end_date': booking.end_date.isoformat(),
@@ -304,7 +320,7 @@ async def create_booking(
         transaction = db.transaction()
         doc_ref = create_booking_transaction(transaction)
         
-        logger.info(f"Booking created: {booking_id} for user {current_user.uid}")
+        logger.info(f"Booking created: {booking_id} for user {guest_id}")
         
         # Fetch created document
         created_doc = doc_ref.get()
@@ -322,7 +338,7 @@ async def create_booking(
 
 @router.get("", response_model=BookingListResponse)
 async def list_user_bookings(
-    current_user: UserResponse = Depends(get_current_user),
+    guest_id: str = Depends(get_guest_id),
     status_filter: Optional[str] = Query(None, description="Filter by status"),
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page")
@@ -333,19 +349,37 @@ async def list_user_bookings(
     Returns bookings ordered by creation date (newest first).
     """
     try:
-        # Query user's bookings
-        query = db.collection(Collections.BOOKINGS)\
-            .where(filter=FieldFilter('user_id', '==', current_user.uid))
+        # Query user's bookings - check both user_id (old bookings) and guest_id (chatbot bookings)
+        logger.info(f"Fetching bookings for guest_id: {guest_id}")
+        
+        # First try guest_id (chatbot bookings)
+        query_guest = db.collection(Collections.BOOKINGS)\
+            .where(filter=FieldFilter('guest_id', '==', guest_id))
+        
+        # Also query for user_id (traditional bookings)
+        query_user = db.collection(Collections.BOOKINGS)\
+            .where(filter=FieldFilter('user_id', '==', guest_id))
         
         # Apply status filter if provided
         if status_filter:
-            query = query.where(filter=FieldFilter('status', '==', status_filter))
+            query_guest = query_guest.where(filter=FieldFilter('status', '==', status_filter))
+            query_user = query_user.where(filter=FieldFilter('status', '==', status_filter))
         
-        # Execute query
-        docs = query.stream()
+        # Execute both queries and combine results
+        docs_guest = list(query_guest.stream())
+        docs_user = list(query_user.stream())
         
-        # Convert to list
-        bookings = [booking_doc_to_response(doc.id, doc.to_dict()) for doc in docs]
+        logger.info(f"Found {len(docs_guest)} bookings with guest_id, {len(docs_user)} bookings with user_id")
+        
+        # Combine and deduplicate by booking ID
+        all_docs = {doc.id: doc for doc in docs_guest + docs_user}
+        
+        # Convert to list, filtering out None values (invalid bookings)
+        bookings = []
+        for doc in all_docs.values():
+            booking = booking_doc_to_response(doc.id, doc.to_dict())
+            if booking is not None:
+                bookings.append(booking)
         
         # Sort by created_at (newest first)
         bookings.sort(key=lambda x: x.created_at or datetime.min, reverse=True)
@@ -356,7 +390,7 @@ async def list_user_bookings(
         end_idx = start_idx + page_size
         paginated_bookings = bookings[start_idx:end_idx]
         
-        logger.info(f"Listed {len(paginated_bookings)} bookings for user {current_user.uid}")
+        logger.info(f"Listed {len(paginated_bookings)} bookings for user {guest_id}")
         
         return BookingListResponse(
             bookings=paginated_bookings,
@@ -375,7 +409,7 @@ async def list_user_bookings(
 
 @router.get("/all", response_model=BookingListResponse)
 async def list_all_bookings(
-    current_user: UserResponse = Depends(require_admin),
+    guest_id: str = Depends(get_guest_id),
     status_filter: Optional[str] = Query(None, description="Filter by status"),
     city: Optional[str] = Query(None, description="Filter by vehicle city"),
     date_from: Optional[date] = Query(None, description="Filter bookings from this date"),
@@ -459,7 +493,7 @@ async def list_all_bookings(
 @router.get("/{booking_id}", response_model=BookingResponse)
 async def get_booking(
     booking_id: str,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Get booking details by ID
@@ -499,7 +533,7 @@ async def get_booking(
 @router.delete("/{booking_id}", status_code=status.HTTP_200_OK)
 async def cancel_booking(
     booking_id: str,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Cancel a booking
@@ -537,7 +571,7 @@ async def cancel_booking(
             'updated_at': firestore.SERVER_TIMESTAMP
         })
         
-        logger.info(f"Booking cancelled: {booking_id} by user {current_user.uid}")
+        logger.info(f"Booking cancelled: {booking_id} by user {guest_id}")
         
         return {
             "message": f"Booking {booking_id} cancelled successfully",
@@ -558,7 +592,7 @@ async def cancel_booking(
 @router.post("/{booking_id}/confirm", response_model=BookingResponse)
 async def confirm_booking(
     booking_id: str,
-    current_user: UserResponse = Depends(get_current_user)
+    guest_id: str = Depends(get_guest_id)
 ):
     """
     Confirm a booking after successful payment
@@ -580,7 +614,7 @@ async def confirm_booking(
         booking_data = doc.to_dict()
         
         # Check authorization
-        if booking_data.get('user_id') != current_user.uid and current_user.role != 'admin':
+        if booking_data.get('user_id') != guest_id and current_user.role != 'admin':
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only confirm your own bookings"

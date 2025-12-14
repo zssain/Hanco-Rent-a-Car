@@ -1,11 +1,8 @@
 import { Routes, Route } from 'react-router-dom';
 import { Layout } from './components/Layout';
-import { ProtectedRoute } from './components/ProtectedRoute';
 
 // Pages
 import { Home } from './pages/Home';
-import { Login } from './pages/Login';
-import { Register } from './pages/Register';
 import { Dashboard } from './pages/Dashboard';
 import { Vehicles } from './pages/Vehicles';
 import { VehicleDetails } from './pages/VehicleDetails';
@@ -20,8 +17,6 @@ export function AppRouter() {
     <Routes>
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
-        <Route path="login" element={<Login />} />
-        <Route path="register" element={<Register />} />
         <Route path="vehicles" element={<Vehicles />} />
         <Route path="vehicles/:id" element={<VehicleDetails />} />
         <Route path="dashboard" element={<Dashboard />} />

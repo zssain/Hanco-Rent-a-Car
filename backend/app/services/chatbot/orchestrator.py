@@ -1,1200 +1,793 @@
 """
-Chatbot Orchestrator Service - Enhanced Version
-Handles conversation flow, intent detection, and service integration
-Powered by Gemini AI with complete booking flow state machine
+Chatbot Orchestrator Service - State Machine Version
+Strict funnel-based conversation flow for Hanco AI
+Powered by Gemini AI with fallback
 """
 
 import logging
 import httpx
 import json
 import re
-from datetime import datetime, date
+import uuid
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional, Any
 
-from google.cloud import firestore
-
 from app.core.config import settings
-from app.core.security import validate_ai_input, safe_log_error
-from app.services.pricing.feature_builder import build_pricing_features
-from app.services.pricing.onnx_runtime import predict_price
+from app.core.firebase import db, Collections
 
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# External APIs
-# -----------------------------
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1/models/"
     "gemini-1.5-flash:generateContent"
 )
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
-# -----------------------------
-# Intents (for general Q&A)
-# -----------------------------
-INTENTS = [
-    "greeting",
-    "faq",
-    "pricing_request",
-    "compare_competitors",
-    "booking_help",
-    "vehicle_inquiry",
-    "general_question",
-]
+# State Machine States
+STATE_IDLE = "idle"
+STATE_VEHICLE_TYPE = "vehicle_type"
+STATE_SELECTION = "selection"
+STATE_DATES = "dates"
+STATE_PICKUP = "pickup"
+STATE_DROPOFF = "dropoff"
+STATE_INSURANCE = "insurance"
+STATE_PAYMENT = "payment"
+STATE_QUOTE = "quote"
+STATE_CONFIRM = "confirm"
+STATE_COMPLETED = "completed"
 
-# -----------------------------
-# Booking state machine
-# -----------------------------
-BOOKING_IDLE = "idle"
-BOOKING_VEHICLE_TYPE = "awaiting_vehicle_type"
-BOOKING_VEHICLE_SELECTION = "awaiting_vehicle_selection"
-BOOKING_DATES = "awaiting_dates"
-BOOKING_LOCATIONS = "awaiting_locations"
-BOOKING_CONFIRMATION = "awaiting_confirmation"
-BOOKING_COMPLETED = "completed"
+# State transitions
+STATE_MACHINE = {
+    STATE_IDLE: STATE_VEHICLE_TYPE,
+    STATE_VEHICLE_TYPE: STATE_SELECTION,
+    STATE_SELECTION: STATE_DATES,
+    STATE_DATES: STATE_PICKUP,
+    STATE_PICKUP: STATE_DROPOFF,
+    STATE_DROPOFF: STATE_INSURANCE,
+    STATE_INSURANCE: STATE_PAYMENT,
+    STATE_PAYMENT: STATE_QUOTE,
+    STATE_QUOTE: STATE_CONFIRM,
+    STATE_CONFIRM: STATE_COMPLETED,
+    STATE_COMPLETED: STATE_IDLE,
+}
 
-
-# ============================================================
-# Utility helpers
-# ============================================================
-
-def _extract_basic_info(message: str) -> Dict[str, Optional[str]]:
-    """Extract simple city / vehicle category / ISO dates from a message."""
-    extracted = {
-        "city": None,
-        "start_date": None,
-        "end_date": None,
-        "vehicle_category": None,
-    }
-
-    msg = message.lower()
-
-    # City
-    cities = ["riyadh", "jeddah", "dammam", "mecca", "medina", "taif"]
-    for c in cities:
-        if c in msg:
-            extracted["city"] = c
-            break
-
-    # Vehicle category
-    categories = ["economy", "compact", "sedan", "suv", "luxury"]
-    for cat in categories:
-        if cat in msg:
-            extracted["vehicle_category"] = cat
-            break
-
-    # ISO style dates
-    date_pattern = r"\d{4}-\d{2}-\d{2}"
-    dates = re.findall(date_pattern, message)
-    if len(dates) >= 2:
-        extracted["start_date"] = dates[0]
-        extracted["end_date"] = dates[1]
-    elif len(dates) == 1:
-        extracted["start_date"] = dates[0]
-
-    return extracted
+VEHICLE_TYPES = ["economy", "sedan", "suv", "luxury"]
+PAYMENT_MODES = ["cash", "card"]
 
 
-def _parse_single_date(text: str) -> Optional[date]:
-    """
-    Try to parse a date from many common formats.
-    - 2025-12-10
-    - 10-12-2025 / 10/12/2025
-    - Dec 10 2025 / 10 Dec 2025
-    - Dec 10 / 10 Dec (assume current year)
-    """
-    text = text.strip()
-
-    # Try several strptime patterns first
-    formats = [
-        "%Y-%m-%d",
-        "%d-%m-%Y",
-        "%d/%m/%Y",
-        "%Y/%m/%d",
-        "%d-%m-%y",
-        "%d/%m/%y",
-        "%d %b %Y",
-        "%d %B %Y",
-        "%b %d %Y",
-        "%B %d %Y",
-        "%d %b",
-        "%d %B",
-        "%b %d",
-        "%B %d",
-    ]
-
-    for fmt in formats:
+class ChatbotOrchestrator:
+    """Chatbot orchestrator with strict state machine"""
+    
+    def __init__(self):
+        self.gemini_api_key = settings.GEMINI_API_KEY
+    
+    async def handle_message(
+        self,
+        user_message: str,
+        session_id: str,
+        guest_id: str
+    ) -> Dict[str, Any]:
+        """
+        Handle incoming chat message with state machine logic.
+        
+        Args:
+            user_message: User's message
+            session_id: Chat session ID
+            guest_id: Guest UUID
+            
+        Returns:
+            Response dict with reply, state, options, etc.
+        """
         try:
-            dt = datetime.strptime(text, fmt)
-            # If year missing, strptime uses 1900; replace with current year
-            if dt.year == 1900:
-                today = date.today()
-                dt = dt.replace(year=today.year)
-            return dt.date()
-        except ValueError:
-            continue
-
-    # Fallback: try dateutil if installed
-    try:
-        from dateutil import parser as date_parser  # type: ignore
-
-        dt = date_parser.parse(text, dayfirst=True, fuzzy=True)
-        return dt.date()
-    except Exception:
-        return None
-
-
-def _parse_date_range(message: str) -> (Optional[str], Optional[str]):
-    """
-    Parse two dates from free text. Accepts many formats like:
-    - 2025-12-01 to 2025-12-05
-    - from 10 Dec to 15 Dec
-    - 10/12/2025 - 15/12/2025
-    Returns ISO strings (YYYY-MM-DD) or (None, None) on failure.
-    """
-    msg = message.lower().replace("–", "-")
-
-    # Common separators: "to", "-", "until"
-    # Split on 'to' or '-'
-    if " to " in msg:
-        parts = msg.split(" to ", 1)
-    elif " until " in msg:
-        parts = msg.split(" until ", 1)
-    elif " - " in msg:
-        parts = msg.split(" - ", 1)
-    else:
-        parts = [msg]
-
-    if len(parts) == 2:
-        start_raw, end_raw = parts[0].strip(), parts[1].strip()
-        start_dt = _parse_single_date(start_raw)
-        end_dt = _parse_single_date(end_raw)
-        if start_dt and end_dt:
-            return start_dt.isoformat(), end_dt.isoformat()
-
-    # Fallback: find any two date-like tokens
-    tokens = re.split(r"[,\n;]", msg)
-    found: List[date] = []
-    for tok in tokens:
-        tok = tok.strip()
-        if tok:
-            d = _parse_single_date(tok)
-            if d:
-                found.append(d)
-    if len(found) >= 2:
-        return found[0].isoformat(), found[1].isoformat()
-
-    return None, None
-
-
-def _extract_pickup_dropoff(message: str) -> (Optional[str], Optional[str]):
-    """
-    Very simple pickup/dropoff parser.
-    Accepts things like:
-    - 'Riyadh Airport to Riyadh City'
-    - 'pickup at Jeddah Airport, drop at Jeddah Downtown'
-    """
-    msg = message.strip()
-
-    if "->" in msg:
-        p, d = msg.split("->", 1)
-        return p.strip(), d.strip()
-    if " to " in msg.lower():
-        p, d = re.split(r"\bto\b", msg, maxsplit=1, flags=re.IGNORECASE)
-        return p.strip(), d.strip()
-
-    # Fallback: if user only gives one location, treat as pickup
-    return msg, None
-
-
-def _extract_city_from_location(loc: str) -> Optional[str]:
-    """Try to guess the city from the pickup location string."""
-    loc_lower = loc.lower()
-    for c in ["riyadh", "jeddah", "dammam", "mecca", "medina", "taif"]:
-        if c in loc_lower:
-            return c
-    return None
-
-
-# ============================================================
-# LLM-based intent detection (for general queries, not booking)
-# ============================================================
-
-async def detect_intent_and_extract(
-    user_message: str,
-    conversation_history: List[Dict],
-    use_gemini: bool = True,
-) -> Dict[str, Any]:
-    """
-    Detect user intent and extract structured data using Gemini or OpenAI.
-    This is ONLY used when we are not already inside a booking flow.
-    """
-    try:
-        context = "\n".join(
-            [
-                f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['message']}"
-                for msg in conversation_history[-5:]
-            ]
-        )
-
-        system_prompt = f"""You are an AI assistant for Hanco AI, a car rental service in Saudi Arabia.
-
-Task:
-- Classify the user's message into one of: {', '.join(INTENTS)}.
-- Extract information ONLY if user directly talks about dates, city, pricing, or cars.
-- If user says they want to rent/book a car, set intent to "booking_help".
-
-Conversation context:
-{context}
-
-User's latest message: {user_message}
-
-Respond ONLY with JSON in this exact format:
-{{
-  "intent": "one of the intent types",
-  "confidence": 0.0,
-  "extracted": {{
-    "city": "city name or null",
-    "start_date": "YYYY-MM-DD or null",
-    "end_date": "YYYY-MM-DD or null",
-    "vehicle_category": "category or null",
-    "vehicle_selection": "specific vehicle name or null"
-  }},
-  "reasoning": "brief explanation"
-}}"""
-
-        if use_gemini and getattr(settings, "GEMINI_API_KEY", None):
-            return await _call_gemini(system_prompt, user_message)
-        elif getattr(settings, "OPENAI_API_KEY", None):
-            return await _call_openai(system_prompt, user_message)
-        else:
-            logger.warning("No AI API key configured, using rule-based intent detection")
-            return _fallback_intent_detection(user_message)
-
-    except Exception as e:
-        logger.error(f"Intent detection error: {e}")
-        return _fallback_intent_detection(user_message)
-
-
-async def _call_gemini(prompt: str, user_message: str) -> Dict[str, Any]:
-    """Call Gemini API with enhanced error handling and JSON parsing."""
-    api_key = getattr(settings, "GEMINI_API_KEY", None)
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not configured")
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{GEMINI_API_URL}?key={api_key}",
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.3,
-                        "maxOutputTokens": 800,
-                        "topP": 0.8,
-                        "topK": 40,
-                    },
-                },
-            )
-
-        if resp.status_code != 200:
-            logger.error(f"Gemini API error: {resp.status_code} - {resp.text}")
-            raise ValueError(f"Gemini API returned status {resp.status_code}")
-
-        data = resp.json()
-        
-        # Extract text from response
-        if not data.get("candidates") or len(data["candidates"]) == 0:
-            logger.warning("Gemini returned no candidates")
-            raise ValueError("No response from Gemini")
+            # Load or create session
+            session = await self._get_or_create_session(session_id, guest_id)
+            current_state = session.get('state', STATE_IDLE)
+            context = session.get('context', {})
             
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        logger.info(f"Gemini raw response: {text[:200]}")
-
-        # Try to extract JSON from the response
-        # Remove markdown code blocks if present
-        text = text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-
-        # Find JSON object
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            logger.warning(f"No JSON found in Gemini response: {text}")
-            raise ValueError("No JSON in Gemini response")
-
-        result = json.loads(m.group())
-        
-        # Validate structure
-        if "intent" not in result:
-            result["intent"] = "general_question"
-        if "confidence" not in result:
-            result["confidence"] = 0.7
-        if "extracted" not in result:
-            result["extracted"] = {}
-        if "reasoning" not in result:
-            result["reasoning"] = "Gemini classification"
+            logger.info(f"Session {session_id} in state: {current_state}")
             
-        logger.info(f"Gemini detected intent: {result.get('intent')}, confidence: {result.get('confidence')}")
-        return result
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error from Gemini: {e}")
-        return _fallback_intent_detection(user_message)
-    except Exception as e:
-        logger.error(f"Gemini API call failed: {e}")
-        return _fallback_intent_detection(user_message)
-
-
-async def _call_openai(prompt: str, user_message: str) -> Dict[str, Any]:
-    """Call OpenAI API as fallback."""
-    api_key = getattr(settings, "OPENAI_API_KEY", None)
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not configured")
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                OPENAI_API_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-3.5-turbo",
-                    "messages": [{"role": "system", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 500,
-                },
-            )
-
-        if resp.status_code != 200:
-            logger.error(f"OpenAI API error: {resp.status_code} - {resp.text}")
-            raise ValueError("OpenAI error")
-
-        data = resp.json()
-        text = data["choices"][0]["message"]["content"]
-        
-        # Extract JSON
-        m = re.search(r"\{[\s\S]*\}", text)
-        if not m:
-            raise ValueError("No JSON in OpenAI response")
-
-        result = json.loads(m.group())
-        logger.info(f"OpenAI detected intent: {result.get('intent')}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"OpenAI API call failed: {e}")
-        return _fallback_intent_detection(user_message)
-
-
-def _fallback_intent_detection(user_message: str) -> Dict[str, Any]:
-    """Rule-based fallback when AI APIs fail."""
-    msg = user_message.lower()
-
-    if any(x in msg for x in ["hello", "hi", "hey", "good morning", "good afternoon", "salam", "marhaba"]):
-        intent = "greeting"
-    elif any(x in msg for x in ["rent", "book", "reserve", "need a car", "want a car", "looking for"]):
-        intent = "booking_help"
-    elif any(x in msg for x in ["price", "cost", "how much", "rate", "payment"]):
-        intent = "pricing_request"
-    elif any(x in msg for x in ["compare", "competitor", "vs", "versus", "better deal"]):
-        intent = "compare_competitors"
-    elif any(x in msg for x in ["available", "show", "list", "vehicle", "car"]):
-        intent = "vehicle_inquiry"
-    else:
-        intent = "general_question"
-
-    return {
-        "intent": intent,
-        "confidence": 0.6,
-        "extracted": _extract_basic_info(user_message),
-        "reasoning": "Rule-based fallback",
-    }
-
-
-# ============================================================
-# Pricing & competitor logic
-# ============================================================
-
-async def get_pricing_info(
-    city: str,
-    start_date: str,
-    end_date: str,
-    vehicle_category: str,
-    firestore_client,
-) -> Dict[str, Any]:
-    """Get pricing information and competitor comparison."""
-    try:
-        start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-        vehicles_ref = firestore_client.collection("vehicles")
-        # category in DB likely capitalized
-        cat_map = {
-            "economy": "Economy",
-            "compact": "Compact",
-            "sedan": "Sedan",
-            "suv": "SUV",
-            "luxury": "Luxury",
-        }
-        firestore_category = cat_map.get(vehicle_category.lower(), vehicle_category)
-
-        vehicle_query = (
-            vehicles_ref.where("category", "==", firestore_category)
-            .where("city", "==", city.title())
-            .where("availability_status", "==", "available")
-            .limit(1)
-            .stream()
-        )
-
-        vehicle_doc = None
-        for doc in vehicle_query:
-            vehicle_doc = doc.to_dict()
-            break
-
-        if not vehicle_doc:
-            return {
-                "error": f"No vehicles found in {vehicle_category} category in {city}",
-                "recommended_price": None,
-                "competitor_prices": [],
-            }
-
-        features = await build_pricing_features(
-            vehicle_doc=vehicle_doc,
-            start_date=start,
-            end_date=end,
-            city=city,
-            firestore_client=firestore_client,
-        )
-
-        daily_price = predict_price(features)
-        rental_days = (end - start).days or 1
-        total_price = daily_price * rental_days
-
-        competitor_ref = firestore_client.collection("competitor_prices")
-        competitor_query = (
-            competitor_ref.where("city", "==", city)
-            .where("category", "==", vehicle_category)
-            .limit(10)
-            .stream()
-        )
-
-        competitors = []
-        for doc in competitor_query:
-            d = doc.to_dict()
-            competitors.append(
-                {
-                    "provider": d.get("provider"),
-                    "price": d.get("price"),
-                    "vehicle_name": d.get("vehicle_name"),
-                }
-            )
-
-        return {
-            "recommended_price": {
-                "daily_rate": round(float(daily_price), 2),
-                "total_price": round(float(total_price), 2),
-                "rental_days": rental_days,
-            },
-            "competitor_prices": competitors,
-            "weather": {
-                "avg_temp": features.get("avg_temp"),
-                "rain": features.get("rain"),
-                "wind": features.get("wind"),
-            },
-            "demand_index": features.get("demand_index", 0.5),
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting pricing info: {e}")
-        return {"error": str(e), "recommended_price": None, "competitor_prices": []}
-
-
-def _format_pricing_reply(
-    vehicle_name: str,
-    city: str,
-    start_date: str,
-    end_date: str,
-    pricing_info: Dict[str, Any],
-) -> str:
-    """Format pricing information with competitor comparison."""
-    if not pricing_info or not pricing_info.get("recommended_price"):
-        return "I couldn't calculate the price right now. Please try again in a moment."
-
-    p = pricing_info["recommended_price"]
-
-    reply = f"**Pricing for {vehicle_name.title()}**\n\n"
-    reply += f"📍 City: {city.title()}\n"
-    reply += f"📅 {start_date} → {end_date} ({p['rental_days']} days)\n"
-    reply += f"💰 Our daily rate: {p['daily_rate']} SAR\n"
-    reply += f"💳 Total rental price: {p['total_price']} SAR\n\n"
-
-    weather = pricing_info.get("weather", {})
-    if weather.get("avg_temp") is not None:
-        reply += f"🌤 Avg temperature during your trip: {weather['avg_temp']}°C\n"
-
-    competitors = pricing_info.get("competitor_prices", [])
-    if competitors:
-        reply += "\n**Competitor daily rates:**\n"
-        for c in competitors[:4]:
-            reply += f"• {c['provider'].title()}: {c['price']} SAR/day"
-            if c.get("vehicle_name"):
-                reply += f" ({c['vehicle_name']})"
-            reply += "\n"
-
-        avg_comp = sum(c["price"] for c in competitors) / len(competitors)
-        if p["daily_rate"] < avg_comp:
-            diff = avg_comp - p["daily_rate"]
-            reply += f"\n✅ You save about {diff:.2f} SAR/day with us on average.\n"
-        else:
-            diff = p["daily_rate"] - avg_comp
-            reply += (
-                f"\n💡 Our price is about {diff:.2f} SAR/day higher, "
-                "but includes premium support and flexibility.\n"
-            )
-
-    reply += (
-        "\nWould you like to continue to payment and confirm this booking? "
-        "You can say **yes** to proceed or **no** to cancel."
-    )
-
-    return reply
-
-
-# ============================================================
-# Booking state-machine logic
-# ============================================================
-
-async def _fetch_vehicles_for_selection(
-    firestore_client,
-    category: str,
-    city: Optional[str],
-    limit: int = 5,
-) -> List[Dict[str, Any]]:
-    """Get available vehicles from Firestore."""
-    vehicles_ref = firestore_client.collection("vehicles")
-    query = vehicles_ref.where("availability_status", "==", "available")
-
-    cat_map = {
-        "economy": "Economy",
-        "compact": "Compact",
-        "sedan": "Sedan",
-        "suv": "SUV",
-        "luxury": "Luxury",
-    }
-    firestore_category = cat_map.get(category.lower(), category)
-    query = query.where("category", "==", firestore_category)
-
-    if city:
-        query = query.where("city", "==", city.title())
-
-    query = query.limit(limit)
-
-    vehicles: List[Dict[str, Any]] = []
-    for doc in query.stream():
-        d = doc.to_dict()
-        vehicles.append(
-            {
-                "id": doc.id,
-                "name": d.get("name"),
-                "category": d.get("category"),
-                "city": d.get("city"),
-                "price": d.get("current_price", d.get("base_daily_rate")),
-            }
-        )
-    return vehicles
-
-
-def _format_vehicle_list_message(
-    vehicles: List[Dict[str, Any]],
-    category: str,
-    city: Optional[str],
-) -> str:
-    """Format vehicle list for display."""
-    if not vehicles:
-        city_part = f" in {city.title()}" if city else ""
-        return (
-            f"Right now I couldn't find available {category.title()} cars{city_part}. "
-            "You can try another category or city."
-        )
-
-    emoji = {
-        "Compact": "🚗",
-        "Economy": "🚗",
-        "Sedan": "🚙",
-        "SUV": "🚐",
-        "Luxury": "💎",
-    }
-    reply = ""
-    cat_title = vehicles[0].get("category", category.title())
-    reply += f"{emoji.get(cat_title, '🚗')} **{cat_title} options"
-    if city:
-        reply += f" in {city.title()}"
-    reply += ":**\n\n"
-
-    for idx, v in enumerate(vehicles, start=1):
-        reply += (
-            f"{idx}. {v['name']} – {v['price']} SAR/day ({v.get('city', '')})\n"
-        )
-
-    reply += "\nPlease type the **car name or number** to select one."
-    return reply
-
-
-def _match_vehicle_selection(
-    user_message: str, vehicles: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    """Match user input to vehicle selection."""
-    msg = user_message.lower().strip()
-
-    # Allow numeric choice (1,2,3…)
-    if msg.isdigit():
-        idx = int(msg) - 1
-        if 0 <= idx < len(vehicles):
-            return vehicles[idx]
-
-    # Match by substring name (FIXED: correct order)
-    for v in vehicles:
-        if v["name"] and msg in v["name"].lower():
-            return v
-
-    return None
-
-
-async def _handle_booking_flow(
-    booking_state: str,
-    user_message: str,
-    session_data: Dict[str, Any],
-    firestore_client,
-) -> (str, Dict[str, Any]):
-    """
-    Handle booking steps based on current booking_state.
-    Returns (reply_message, updated_session_fields)
-    """
-
-    update: Dict[str, Any] = {}
-
-    # 1) Vehicle type
-    if booking_state == BOOKING_VEHICLE_TYPE:
-        # Try to extract category
-        info = _extract_basic_info(user_message)
-        category = info.get("vehicle_category")
-
-        if not category:
-            # Try simple keyword match
-            for cat in ["economy", "compact", "sedan", "suv", "luxury"]:
-                if cat in user_message.lower():
-                    category = cat
-                    break
-
-        if not category:
-            return (
-                "Please tell me what type of car you prefer:\n\n"
-                "• **Economy** - Budget-friendly compact cars\n"
-                "• **Compact** - Small and efficient\n"
-                "• **Sedan** - Comfortable mid-size cars\n"
-                "• **SUV** - Spacious for families\n"
-                "• **Luxury** - Premium experience\n\n"
-                "Just type the category name (e.g., 'Sedan')",
-                update,
-            )
-
-        city = session_data.get("city") or info.get("city")
-        update["vehicle_category"] = category
-        if city:
-            update["city"] = city
-
-        vehicles = await _fetch_vehicles_for_selection(
-            firestore_client, category=category, city=city
-        )
-        update["booking_state"] = BOOKING_VEHICLE_SELECTION
-        update["vehicle_options"] = vehicles  # stored for next step
-        return _format_vehicle_list_message(vehicles, category, city), update
-
-    # 2) Vehicle selection
-    if booking_state == BOOKING_VEHICLE_SELECTION:
-        vehicles = session_data.get("vehicle_options") or []
-        selected = _match_vehicle_selection(user_message, vehicles)
-
-        if not selected:
-            msg = "I couldn't match that to one of the listed cars. "
-            msg += "Please reply with the car **number** (like 1 or 2) or the car name."
-            return msg, update
-
-        update["selected_vehicle"] = selected
-        update["booking_state"] = BOOKING_DATES
-        return (
-            f"Great choice! **{selected['name']}**.\n\n"
-            "From **when to when** do you need the car? "
-            "You can type dates in any format, for example:\n"
-            "• 2025-12-10 to 2025-12-15\n"
-            "• 10 Dec to 15 Dec\n"
-            "• 10/12/2025 - 15/12/2025\n"
-            "• from 10 December until 15 December",
-            update,
-        )
-
-    # 3) Dates
-    if booking_state == BOOKING_DATES:
-        start_iso, end_iso = _parse_date_range(user_message)
-        if not start_iso or not end_iso:
-            return (
-                "I couldn't clearly understand the dates. "
-                "Please type them again, for example:\n"
-                "• `10 Dec to 15 Dec`\n"
-                "• `2025-12-10 to 2025-12-15`\n"
-                "• `from 10 December until 15 December`",
-                update,
-            )
-
-        # CRITICAL: Save dates to update dict so they're in session for next step
-        update["start_date"] = start_iso
-        update["end_date"] = end_iso
-        update["booking_state"] = BOOKING_LOCATIONS
-        
-        logger.info(f"Dates saved: {start_iso} to {end_iso}")
-        
-        return (
-            f"Perfect! Got your dates: **{start_iso} to {end_iso}**.\n\n"
-            "Now please tell me the **pickup and dropoff locations**.\n"
-            "Example: `Riyadh Airport to Riyadh City`\n"
-            "Or just: `Jeddah Airport` (if same for both)",
-            update,
-        )
-
-    # 4) Locations
-    if booking_state == BOOKING_LOCATIONS:
-        pickup, dropoff = _extract_pickup_dropoff(user_message)
-        if not pickup:
-            return (
-                "I couldn't read the pickup location. "
-                "Please type it again, for example:\n"
-                "• `Riyadh Airport to Riyadh City`\n"
-                "• `Jeddah Airport`",
-                update,
-            )
-
-        update["pickup_location"] = pickup
-        update["dropoff_location"] = dropoff or pickup
-        # Try to infer city from pickup, if not already known
-        city = session_data.get("city") or _extract_city_from_location(pickup)
-        if city:
-            update["city"] = city
-
-        # Get all required data from session
-        category = session_data.get("vehicle_category")
-        selected_vehicle = session_data.get("selected_vehicle", {})
-        city = update.get("city") or session_data.get("city")
-        start_date = session_data.get("start_date")
-        end_date = session_data.get("end_date")
-
-        # Log for debugging
-        logger.info(f"Location step - city={city}, category={category}, start={start_date}, end={end_date}")
-
-        pricing_info = None
-        if city and start_date and end_date and category:
-            try:
-                logger.info(f"Calculating pricing: city={city}, category={category}, dates={start_date} to {end_date}")
-                pricing_info = await get_pricing_info(
-                    city=city,
-                    start_date=start_date,
-                    end_date=end_date,
-                    vehicle_category=category,
-                    firestore_client=firestore_client,
-                )
-                update["pricing_info"] = pricing_info
-                logger.info(f"Pricing calculated successfully")
-            except Exception as e:
-                logger.error(f"Error calculating pricing: {e}", exc_info=True)
-                # Set fallback pricing structure instead of leaving as None
-                pricing_info = {
-                    "recommended_price": {
-                        "daily_rate": "TBD",
-                        "total_price": "TBD",
-                        "rental_days": 0
-                    },
-                    "competitor_prices": [],
-                    "error": str(e)
-                }
-                update["pricing_info"] = pricing_info
-        else:
-            logger.warning(f"Missing data for pricing: city={city}, start={start_date}, end={end_date}, category={category}")
-
-        update["booking_state"] = BOOKING_CONFIRMATION
-
-        if pricing_info and pricing_info.get("recommended_price"):
-            reply = _format_pricing_reply(
-                vehicle_name=selected_vehicle.get("name", category),
-                city=city or "your city",
-                start_date=start_date,
-                end_date=end_date,
-                pricing_info=pricing_info,
-            )
-            return reply, update
-
-        # Fallback message if pricing failed
-        return (
-            f"✅ Pickup: **{pickup}**\n"
-            f"✅ Dropoff: **{dropoff or pickup}**\n\n"
-            "I'm ready to create your booking! "
-            "Please say **yes** to confirm or **no** to cancel.",
-            update,
-        )
-
-    # 5) Confirmation
-    if booking_state == BOOKING_CONFIRMATION:
-        msg = user_message.lower()
-        if any(x in msg for x in ["yes", "confirm", "ok", "sure", "yup", "proceed", "continue"]):
-            # Create a booking document (pending payment)
-            bookings_ref = firestore_client.collection("bookings")
-            booking_data = {
-                "created_at": firestore.SERVER_TIMESTAMP,
-                "status": "pending_payment",
-                "session_id": session_data.get("session_id"),
-                "user_id": session_data.get("user_id"),
-                "city": session_data.get("city"),
-                "vehicle_category": session_data.get("vehicle_category"),
-                "selected_vehicle": session_data.get("selected_vehicle"),
-                "start_date": session_data.get("start_date"),
-                "end_date": session_data.get("end_date"),
-                "pickup_location": session_data.get("pickup_location"),
-                "dropoff_location": session_data.get("dropoff_location"),
-                "pricing_info": session_data.get("pricing_info"),
-            }
-            booking_doc = bookings_ref.document()
-            booking_id = booking_doc.id
-            booking_data["booking_id"] = booking_id
-            booking_doc.set(booking_data)
-
-            update["booking_state"] = BOOKING_COMPLETED
-            update["booking_id"] = booking_id
-
-            payment_link = f"/payment?booking_id={booking_id}"
-            
-            # Get pricing for summary - handle None safely
-            pricing_info = session_data.get("pricing_info") or {}
-            recommended = pricing_info.get("recommended_price") or {}
-            total = recommended.get("total_price", "TBD")
-            
-            reply = (
-                f"🎉 **Booking Confirmed!**\n\n"
-                f"Booking ID: **{booking_id}**\n"
-                f"Vehicle: **{session_data.get('selected_vehicle', {}).get('name', 'N/A')}**\n"
-                f"Dates: **{session_data.get('start_date')} to {session_data.get('end_date')}**\n"
-                f"Pickup: **{session_data.get('pickup_location')}**\n"
-                f"Total: **{total} SAR**\n\n"
-                f"🔗 [Proceed to Payment]({payment_link})\n\n"
-                "Once payment is successful, your booking will be confirmed and you'll receive a confirmation email!"
-            )
-            return reply, update
-
-        if any(x in msg for x in ["no", "cancel", "stop", "abort"]):
-            update["booking_state"] = BOOKING_IDLE
-            return (
-                "❌ No problem, I have cancelled this booking flow. "
-                "If you want to start again, just say **I want to rent a car**.",
-                update,
-            )
-
-        return (
-            "Please say **yes** to continue with payment or **no** to cancel the booking.",
-            update,
-        )
-
-    # If somehow reached here with invalid state
-    update["booking_state"] = BOOKING_IDLE
-    return (
-        "I got a bit confused about where we were in the booking. "
-        "Let's start again — tell me **I want to rent a car**.",
-        update,
-    )
-
-
-# ============================================================
-# Main message handler
-# ============================================================
-
-async def handle_message(
-    session_id: str,
-    user_message: str,
-    user: Dict,
-    firestore_client,
-) -> Dict[str, Any]:
-    """
-    Main orchestrator for handling chat messages.
-    Orchestration logic:
-      1) Validate AI input (prevent prompt injection)
-      2) Load session (including booking_state)
-      3) If we are mid-booking → use booking state machine
-      4) Else → use intent detection (Gemini) for general queries
-    """
-    try:
-        # AI SECURITY: Validate and sanitize user input before processing
-        try:
-            validate_ai_input(user_message)
-        except ValueError as e:
-            logger.warning(f"Invalid AI input from session {session_id}: {str(e)}")
-            return {
-                "reply": "I'm sorry, your message contains invalid content. Please rephrase your request.",
-                "intent": "validation_error",
-                "extracted": {},
-                "session_id": session_id,
-            }
-        
-        logger.info(
-            f"Processing message for session {session_id}: {user_message[:80]!r}"
-        )
-
-        messages_ref = firestore_client.collection("chat_messages")
-        session_ref = firestore_client.collection("chat_sessions").document(
-            session_id
-        )
-
-        # Load session data (if exists)
-        session_doc = session_ref.get()
-        session_data: Dict[str, Any] = session_doc.to_dict() if session_doc.exists else {}
-        booking_state = session_data.get("booking_state", BOOKING_IDLE)
-
-        # Load conversation history for LLM context (best effort)
-        conversation_history: List[Dict[str, Any]] = []
-        try:
-            history_docs = (
-                messages_ref.where("session_id", "==", session_id)
-                .order_by("timestamp")
-                .limit(20)
-                .stream()
-            )
-            for doc in history_docs:
-                d = doc.to_dict()
-                conversation_history.append(
-                    {
-                        "role": d.get("role"),
-                        "message": d.get("message"),
-                        "timestamp": d.get("timestamp"),
-                    }
-                )
-        except Exception as e:
-            logger.warning(f"Could not load conversation history: {e}")
-
-        # -------------------------------------------
-        # 1) If we already are inside a booking flow,
-        #    completely ignore normal intent detection
-        # -------------------------------------------
-        if booking_state != BOOKING_IDLE and booking_state != BOOKING_COMPLETED:
-            logger.info(f"Continuing booking flow in state: {booking_state}")
-            reply, updated_fields = await _handle_booking_flow(
-                booking_state, user_message, session_data, firestore_client
-            )
-            # merge session data
-            updated_fields.update(
-                {
-                    "session_id": session_id,
-                    "user_id": user.get("uid") if user else None,
-                    "last_activity": firestore.SERVER_TIMESTAMP,
-                }
-            )
-            session_ref.set(updated_fields, merge=True)
-            booking_state = updated_fields.get("booking_state", booking_state)
-            extracted = {}  # not used in this path
-            intent = "booking_flow"
-
-        else:
-            # -------------------------------------------
-            # 2) No active booking: use intent detection
-            # -------------------------------------------
-            logger.info("No active booking - using intent detection")
-            intent_result = await detect_intent_and_extract(
-                user_message, conversation_history
-            )
-            intent = intent_result.get("intent", "general_question")
-            extracted = intent_result.get("extracted", {}) or {}
-            logger.info(f"Detected intent={intent}, extracted={extracted}")
-
-            # --- Greeting ---
-            if intent == "greeting":
-                reply = (
-                    "Hello! 👋 I'm **Hanco AI Assistant**.\n\n"
-                    "I can help you:\n"
-                    "• Rent a car in Saudi Arabia 🚗\n"
-                    "• Compare prices with competitors 💰\n"
-                    "• Guide you through booking 📋\n\n"
-                    "To start, just say: **I want to rent a car**"
-                )
-
-            # --- Booking start ---
-            elif intent == "booking_help" or any(
-                x in user_message.lower() for x in ["rent", "book", "reserve", "need a car", "want a car"]
-            ):
-                # Start booking flow
-                booking_state = BOOKING_VEHICLE_TYPE
-                city = extracted.get("city")
-                session_ref.set(
-                    {
-                        "session_id": session_id,
-                        "user_id": user.get("uid") if user else None,
-                        "booking_state": booking_state,
-                        "city": city,
-                        "last_activity": firestore.SERVER_TIMESTAMP,
-                    },
-                    merge=True,
-                )
-                reply = (
-                    "Nice! Let's get you a car. 🚗\n\n"
-                    "First, what type of car do you prefer?\n\n"
-                    "• **Economy** - Budget-friendly\n"
-                    "• **Compact** - Small and efficient\n"
-                    "• **Sedan** - Comfortable mid-size\n"
-                    "• **SUV** - Spacious for families\n"
-                    "• **Luxury** - Premium experience\n\n"
-                    "Just reply with the type, like **Sedan**"
-                )
-                extracted = {"city": city}
-
-            # --- General pricing question (not full flow) ---
-            elif intent in ["pricing_request", "compare_competitors"]:
-                info = _extract_basic_info(user_message)
-                city = extracted.get("city") or info.get("city")
-                category = extracted.get("vehicle_category") or info.get(
-                    "vehicle_category"
-                )
-                start_iso, end_iso = _parse_date_range(user_message)
-                if not (city and category and start_iso and end_iso):
-                    reply = (
-                        "To give you an exact price I need:\n\n"
-                        "• **City** (Riyadh, Jeddah, Dammam, Mecca, Medina, Taif)\n"
-                        "• **Vehicle type** (Economy, Compact, Sedan, SUV, Luxury)\n"
-                        "• **Dates** (e.g., `2025-12-10 to 2025-12-15`)\n\n"
-                        "You can type it like:\n"
-                        "`I need a Sedan in Riyadh from 2025-12-10 to 2025-12-15`"
-                    )
-                else:
-                    pricing_info = await get_pricing_info(
-                        city=city,
-                        start_date=start_iso,
-                        end_date=end_iso,
-                        vehicle_category=category,
-                        firestore_client=firestore_client,
-                    )
-                    reply = _format_pricing_reply(
-                        vehicle_name=category,
-                        city=city,
-                        start_date=start_iso,
-                        end_date=end_iso,
-                        pricing_info=pricing_info,
-                    )
-
-            # --- Vehicle inquiry ---
-            elif intent == "vehicle_inquiry":
-                info = _extract_basic_info(user_message)
-                city = extracted.get("city") or info.get("city")
-                category = extracted.get("vehicle_category") or info.get("vehicle_category")
-                
-                if category:
-                    vehicles = await _fetch_vehicles_for_selection(
-                        firestore_client, category=category, city=city, limit=5
-                    )
-                    reply = _format_vehicle_list_message(vehicles, category, city)
-                    reply += "\n\nWould you like to book one? Say **I want to rent a car** to start!"
-                else:
-                    reply = (
-                        "I can show you available vehicles!\n\n"
-                        "Which category are you interested in?\n"
-                        "• Economy\n• Compact\n• Sedan\n• SUV\n• Luxury"
-                    )
-
-            # --- FAQ / general question ---
-            elif intent == "faq":
-                reply = (
-                    "I can help you with:\n\n"
-                    "• **Renting a car** (full booking flow)\n"
-                    "• **Checking prices** and discounts\n"
-                    "• **Comparing prices** with competitors\n"
-                    "• **Viewing available vehicles** in each city\n\n"
-                    "Tell me what you want, for example:\n"
-                    "*I want to rent a car in Riyadh*"
-                )
-
+            # Process message based on current state
+            if current_state == STATE_IDLE:
+                response = await self._handle_idle(user_message, context)
+            elif current_state == STATE_VEHICLE_TYPE:
+                response = await self._handle_vehicle_type(user_message, context)
+            elif current_state == STATE_SELECTION:
+                response = await self._handle_selection(user_message, context)
+            elif current_state == STATE_DATES:
+                response = await self._handle_dates(user_message, context)
+            elif current_state == STATE_PICKUP:
+                response = await self._handle_pickup(user_message, context)
+            elif current_state == STATE_DROPOFF:
+                response = await self._handle_dropoff(user_message, context)
+            elif current_state == STATE_INSURANCE:
+                response = await self._handle_insurance(user_message, context)
+            elif current_state == STATE_PAYMENT:
+                response = await self._handle_payment(user_message, context)
+            elif current_state == STATE_QUOTE:
+                response = await self._handle_quote(user_message, context)
+            elif current_state == STATE_CONFIRM:
+                response = await self._handle_confirm(user_message, context, guest_id)
             else:
-                # Very generic default
-                reply = (
-                    "I'm here to help you with car rentals in Saudi Arabia! 🇸🇦\n\n"
-                    "You can say things like:\n"
-                    "• *I want to rent a car*\n"
-                    "• *Show me available SUVs in Riyadh*\n"
-                    "• *Compare your prices with competitors for a sedan in Jeddah*\n\n"
-                    "How can I assist you today?"
-                )
-
-            # Update session "last seen"
-            session_ref.set(
-                {
-                    "session_id": session_id,
-                    "user_id": user.get("uid") if user else None,
-                    "booking_state": booking_state,
-                    "last_activity": firestore.SERVER_TIMESTAMP,
-                    "last_message": user_message[:100],
-                },
-                merge=True,
+                response = {
+                    'reply': "I'm having trouble. Let's start over. What type of vehicle are you looking for?",
+                    'next_state': STATE_VEHICLE_TYPE,
+                    'context': {}
+                }
+            
+            # Update session
+            await self._update_session(
+                session_id,
+                response.get('next_state', current_state),
+                response.get('context', context)
             )
-
-        # -------------------------------------------
-        # Save chat messages
-        # -------------------------------------------
-        user_msg_ref = messages_ref.document()
-        user_msg_ref.set(
-            {
-                "session_id": session_id,
-                "role": "user",
-                "message": user_message,
-                "timestamp": firestore.SERVER_TIMESTAMP,
-                "user_id": user.get("uid") if user else None,
+            
+            # Store message
+            await self._store_message(session_id, user_message, response['reply'])
+            
+            return {
+                'session_id': session_id,
+                'reply': response['reply'],
+                'state': response.get('next_state', current_state),
+                'options': response.get('options'),
+                'data': response.get('data')
             }
-        )
-
-        assistant_msg_ref = messages_ref.document()
-        assistant_msg_ref.set(
-            {
-                "session_id": session_id,
-                "role": "assistant",
-                "message": reply,
-                "intent": intent,
-                "extracted": extracted,
-                "timestamp": firestore.SERVER_TIMESTAMP,
+            
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+            return {
+                'session_id': session_id,
+                'reply': "I encountered an error. Let's start over. What type of vehicle do you need?",
+                'state': STATE_VEHICLE_TYPE,
+                'options': VEHICLE_TYPES
             }
-        )
-
-        # Increase message count
-        session_ref.set(
-            {
-                "message_count": firestore.Increment(2),
-            },
-            merge=True,
-        )
-
-        logger.info(f"✅ Message processed successfully for session {session_id}")
-
+    
+    async def _handle_idle(self, message: str, context: Dict) -> Dict:
+        """Handle idle state - start booking flow"""
+        # Get available vehicle types from Firebase
+        available_types = await self._get_available_vehicle_types()
+        
+        if not available_types:
+            return {
+                'reply': "👋 Welcome to Hanco AI! Unfortunately, we don't have any vehicles available at the moment. Please check back later.",
+                'next_state': STATE_IDLE,
+                'context': {}
+            }
+        
+        types_list = "\n".join([f"• {vtype.title()}" for vtype in available_types])
+        
         return {
-            "reply": reply,
-            "intent": intent,
-            "extracted": extracted,
-            "session_id": session_id,
-            "booking_state": booking_state,
+            'reply': f"👋 Welcome to Hanco AI! I'll help you book the perfect vehicle.\n\nWhat type of vehicle are you looking for?\n\n{types_list}\n\nJust tell me which one interests you!",
+            'next_state': STATE_VEHICLE_TYPE,
+            'context': {'available_types': available_types},
+            'options': available_types
         }
-
-    except Exception as e:
-        safe_log_error("Error handling chatbot message", e)
+    
+    async def _get_available_vehicle_types(self) -> List[str]:
+        """Fetch available vehicle categories from Firebase"""
+        try:
+            categories = set()
+            docs = db.collection(Collections.VEHICLES).where('availability_status', '==', 'available').limit(100).stream()
+            
+            for doc in docs:
+                vdata = doc.to_dict()
+                category = vdata.get('category', '')
+                if category:
+                    # Store as-is from database (preserves capitalization)
+                    categories.add(category)
+            
+            return sorted(list(categories))
+        except Exception as e:
+            logger.error(f"Error fetching vehicle types: {e}")
+            return []
+    
+    async def _handle_vehicle_type(self, message: str, context: Dict) -> Dict:
+        """Handle vehicle type selection with Gemini understanding"""
+        msg_lower = message.lower()
+        available_types = context.get('available_types', [])
+        
+        # If user asks what's available, show all types
+        if any(word in msg_lower for word in ['what', 'which', 'available', 'have', 'show', 'list', 'options']):
+            if not available_types:
+                available_types = await self._get_available_vehicle_types()
+            
+            if not available_types:
+                return {
+                    'reply': "I'm sorry, we don't have any vehicles available at the moment. Please check back later.",
+                    'next_state': STATE_IDLE,
+                    'context': {}
+                }
+            
+            types_list = "\n".join([f"• **{vtype}**" for vtype in available_types])
+            return {
+                'reply': f"Here are the vehicle types we currently have available:\n\n{types_list}\n\nWhich type would you like?",
+                'next_state': STATE_VEHICLE_TYPE,
+                'context': {'available_types': available_types},
+                'options': available_types
+            }
+        
+        # Use Gemini to understand which vehicle type user wants
+        selected_type = await self._extract_vehicle_type_with_gemini(message, available_types)
+        
+        if not selected_type:
+            # Fallback to case-insensitive keyword matching
+            if not available_types:
+                available_types = await self._get_available_vehicle_types()
+            
+            for vtype in available_types or VEHICLE_TYPES:
+                if vtype.lower() in msg_lower or msg_lower in vtype.lower():
+                    selected_type = vtype  # Use exact database value
+                    break
+        
+        if not selected_type:
+            if not available_types:
+                available_types = await self._get_available_vehicle_types()
+            
+            types_list = "\n".join([f"• {vtype}" for vtype in available_types]) if available_types else "• Economy\n• Sedan\n• SUV\n• Luxury"
+            
+            return {
+                'reply': f"I didn't quite catch that. Please choose one of these vehicle types:\n\n{types_list}",
+                'next_state': STATE_VEHICLE_TYPE,
+                'context': {'available_types': available_types},
+                'options': available_types
+            }
+        
+        # Fetch matching vehicles using the exact category value from database
+        try:
+            vehicles = []
+            docs = db.collection(Collections.VEHICLES)\
+                .where('category', '==', selected_type)\
+                .where('availability_status', '==', 'available')\
+                .limit(5)\
+                .stream()
+            
+            for doc in docs:
+                vdata = doc.to_dict()
+                # Get price from current_price or base_daily_rate
+                daily_rate = vdata.get('current_price', vdata.get('base_daily_rate', 0))
+                vehicles.append({
+                    'id': doc.id,
+                    'make': vdata.get('make'),
+                    'model': vdata.get('model'),
+                    'year': vdata.get('year'),
+                    'daily_rate': daily_rate
+                })
+            
+            if not vehicles:
+                if not available_types:
+                    available_types = await self._get_available_vehicle_types()
+                
+                types_list = "\n".join([f"• {vtype.title()}" for vtype in available_types]) if available_types else ""
+                
+                # Build reply message
+                reply_msg = f"Sorry, we don't have any **{selected_type.title()}** vehicles available right now.\n\n"
+                if types_list:
+                    reply_msg += f"Try another category:\n\n{types_list}"
+                else:
+                    reply_msg += "Please try another category."
+                
+                return {
+                    'reply': reply_msg,
+                    'next_state': STATE_VEHICLE_TYPE,
+                    'context': {'available_types': available_types},
+                    'options': available_types
+                }
+            
+            # Format vehicle list
+            vehicle_list = "\n".join([
+                f"{i+1}. {v['make']} {v['model']} ({v['year']}) - {v['daily_rate']} SAR/day"
+                for i, v in enumerate(vehicles)
+            ])
+            
+            context['vehicle_type'] = selected_type
+            context['available_vehicles'] = vehicles
+            
+            return {
+                'reply': f"Great! Here are our available {selected_type} vehicles:\n\n{vehicle_list}\n\nPlease select a vehicle by number (1-{len(vehicles)}):",
+                'next_state': STATE_SELECTION,
+                'context': context,
+                'data': {'vehicles': vehicles}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error fetching vehicles: {e}")
+            return {
+                'reply': "Error loading vehicles. Please try again.",
+                'next_state': STATE_VEHICLE_TYPE,
+                'context': context
+            }
+    
+    async def _handle_selection(self, message: str, context: Dict) -> Dict:
+        """Handle vehicle selection"""
+        vehicles = context.get('available_vehicles', [])
+        
+        if not vehicles:
+            return {
+                'reply': "Something went wrong. Let's start over. What vehicle type?",
+                'next_state': STATE_VEHICLE_TYPE,
+                'context': {},
+                'options': VEHICLE_TYPES
+            }
+        
+        # Parse selection number
+        try:
+            selection = int(re.search(r'\d+', message).group())
+            if selection < 1 or selection > len(vehicles):
+                raise ValueError
+            
+            selected_vehicle = vehicles[selection - 1]
+            context['vehicle_id'] = selected_vehicle['id']
+            context['selected_vehicle'] = selected_vehicle
+            
+            return {
+                'reply': f"Perfect! You've selected the {selected_vehicle['make']} {selected_vehicle['model']}.\n\n📅 When do you need it? Please provide your rental dates (e.g., 'Jan 15 to Jan 20' or '2025-01-15 to 2025-01-20'):",
+                'next_state': STATE_DATES,
+                'context': context
+            }
+            
+        except (AttributeError, ValueError):
+            return {
+                'reply': f"Please enter a valid number between 1 and {len(vehicles)}:",
+                'next_state': STATE_SELECTION,
+                'context': context
+            }
+    
+    async def _handle_dates(self, message: str, context: Dict) -> Dict:
+        """Handle date selection"""
+        start_date, end_date = self._parse_dates(message)
+        
+        if not start_date or not end_date:
+            return {
+                'reply': "I couldn't understand those dates. Please provide dates like 'Jan 15 to Jan 20' or '2025-01-15 to 2025-01-20':",
+                'next_state': STATE_DATES,
+                'context': context
+            }
+        
+        # Validate dates
+        if start_date < date.today():
+            return {
+                'reply': "Start date cannot be in the past. Please provide valid dates:",
+                'next_state': STATE_DATES,
+                'context': context
+            }
+        
+        if end_date <= start_date:
+            return {
+                'reply': "End date must be after start date. Please provide valid dates:",
+                'next_state': STATE_DATES,
+                'context': context
+            }
+        
+        context['start_date'] = start_date.isoformat()
+        context['end_date'] = end_date.isoformat()
+        duration = (end_date - start_date).days
+        context['duration'] = duration
+        
+        # Fetch branches
+        try:
+            branches = []
+            docs = db.collection(Collections.BRANCHES).where('is_active', '==', True).stream()
+            
+            for doc in docs:
+                bdata = doc.to_dict()
+                branches.append({
+                    'id': doc.id,
+                    'name': bdata.get('name'),
+                    'city': bdata.get('city'),
+                    'address': bdata.get('address')
+                })
+            
+            context['available_branches'] = branches
+            
+            branch_list = "\n".join([
+                f"{i+1}. {b['name']} ({b['city']}) - {b['address']}"
+                for i, b in enumerate(branches)
+            ])
+            
+            return {
+                'reply': f"📍 Where would you like to pick up the vehicle?\n\n{branch_list}\n\nSelect pickup location by number:",
+                'next_state': STATE_PICKUP,
+                'context': context,
+                'data': {'branches': branches}
+            }
+            
+        except Exception as e:
+            logger.error(f"Error fetching branches: {e}")
+            return {
+                'reply': "Error loading branch locations. Please try again.",
+                'next_state': STATE_DATES,
+                'context': context
+            }
+    
+    async def _handle_pickup(self, message: str, context: Dict) -> Dict:
+        """Handle pickup branch selection"""
+        branches = context.get('available_branches', [])
+        
+        try:
+            selection = int(re.search(r'\d+', message).group())
+            if selection < 1 or selection > len(branches):
+                raise ValueError
+            
+            selected_branch = branches[selection - 1]
+            context['pickup_branch_id'] = selected_branch['id']
+            context['pickup_branch'] = selected_branch
+            
+            branch_list = "\n".join([
+                f"{i+1}. {b['name']} ({b['city']}) - {b['address']}"
+                for i, b in enumerate(branches)
+            ])
+            
+            return {
+                'reply': f"✅ Pickup: {selected_branch['name']}\n\n📍 Where would you like to drop off the vehicle?\n\n{branch_list}\n\nSelect dropoff location by number:",
+                'next_state': STATE_DROPOFF,
+                'context': context
+            }
+            
+        except (AttributeError, ValueError):
+            return {
+                'reply': f"Please enter a valid number between 1 and {len(branches)}:",
+                'next_state': STATE_PICKUP,
+                'context': context
+            }
+    
+    async def _handle_dropoff(self, message: str, context: Dict) -> Dict:
+        """Handle dropoff branch selection"""
+        branches = context.get('available_branches', [])
+        
+        try:
+            selection = int(re.search(r'\d+', message).group())
+            if selection < 1 or selection > len(branches):
+                raise ValueError
+            
+            selected_branch = branches[selection - 1]
+            context['dropoff_branch_id'] = selected_branch['id']
+            context['dropoff_branch'] = selected_branch
+            
+            return {
+                'reply': f"✅ Dropoff: {selected_branch['name']}\n\n🛡️ Would you like to add insurance? (15% of subtotal)\n\nReply 'yes' or 'no':",
+                'next_state': STATE_INSURANCE,
+                'context': context
+            }
+            
+        except (AttributeError, ValueError):
+            return {
+                'reply': f"Please enter a valid number between 1 and {len(branches)}:",
+                'next_state': STATE_DROPOFF,
+                'context': context
+            }
+    
+    async def _handle_insurance(self, message: str, context: Dict) -> Dict:
+        """Handle insurance selection"""
+        msg_lower = message.lower()
+        
+        if 'yes' in msg_lower or 'sure' in msg_lower or 'ok' in msg_lower:
+            insurance_selected = True
+        elif 'no' in msg_lower or 'skip' in msg_lower:
+            insurance_selected = False
+        else:
+            return {
+                'reply': "Please reply 'yes' or 'no' for insurance:",
+                'next_state': STATE_INSURANCE,
+                'context': context
+            }
+        
+        context['insurance_selected'] = insurance_selected
+        
         return {
-            "reply": "I'm sorry, something went wrong while processing your request. "
-                     "Please try again in a moment.",
-            "intent": "error",
-            "extracted": {},
-            "session_id": session_id,
-            "error": str(e),
+            'reply': f"{'✅ Insurance added' if insurance_selected else '❌ No insurance'}\n\n💳 How would you like to pay?\n\nOptions: cash, card",
+            'next_state': STATE_PAYMENT,
+            'context': context,
+            'options': PAYMENT_MODES
         }
+    
+    async def _handle_payment(self, message: str, context: Dict) -> Dict:
+        """Handle payment mode selection"""
+        msg_lower = message.lower()
+        
+        payment_mode = None
+        for mode in PAYMENT_MODES:
+            if mode in msg_lower:
+                payment_mode = mode
+                break
+        
+        if not payment_mode:
+            return {
+                'reply': "Please choose 'cash' or 'card':",
+                'next_state': STATE_PAYMENT,
+                'context': context,
+                'options': PAYMENT_MODES
+            }
+        
+        context['payment_mode'] = payment_mode
+        
+        # Calculate pricing
+        vehicle = context.get('selected_vehicle', {})
+        duration = context.get('duration', 1)
+        daily_rate = vehicle.get('daily_rate', 0)
+        subtotal = daily_rate * duration
+        insurance_amount = subtotal * 0.15 if context.get('insurance_selected') else 0
+        total = subtotal + insurance_amount
+        
+        context['subtotal'] = subtotal
+        context['insurance_amount'] = insurance_amount
+        context['total_price'] = total
+        
+        # Format quote
+        quote = f"""
+📊 **PRICE QUOTE**
+
+🚗 Vehicle: {vehicle.get('make')} {vehicle.get('model')}
+📅 Duration: {duration} days ({daily_rate} SAR/day)
+💵 Subtotal: {subtotal:.2f} SAR
+🛡️ Insurance (15%): {insurance_amount:.2f} SAR
+💳 Payment: {payment_mode}
+
+**TOTAL: {total:.2f} SAR**
+
+Would you like to confirm this booking? (yes/no)
+"""
+        
+        return {
+            'reply': quote,
+            'next_state': STATE_CONFIRM,
+            'context': context,
+            'data': {
+                'quote': {
+                    'subtotal': subtotal,
+                    'insurance': insurance_amount,
+                    'total': total
+                }
+            }
+        }
+    
+    async def _handle_quote(self, message: str, context: Dict) -> Dict:
+        """Handle quote display (should not reach here usually)"""
+        return await self._handle_payment(message, context)
+    
+    async def _handle_confirm(self, message: str, context: Dict, guest_id: str) -> Dict:
+        """Handle booking confirmation"""
+        msg_lower = message.lower()
+        
+        if 'yes' in msg_lower or 'confirm' in msg_lower or 'sure' in msg_lower:
+            # Create booking
+            try:
+                booking_id = str(uuid.uuid4())
+                booking_data = {
+                    'id': booking_id,
+                    'guest_id': guest_id,
+                    'vehicle_id': context['vehicle_id'],
+                    'start_date': context['start_date'],
+                    'end_date': context['end_date'],
+                    'pickup_branch_id': context['pickup_branch_id'],
+                    'dropoff_branch_id': context['dropoff_branch_id'],
+                    'insurance_selected': context.get('insurance_selected', False),
+                    'insurance_amount': context.get('insurance_amount', 0),
+                    'total_price': context.get('total_price', 0),
+                    'payment_mode': context.get('payment_mode', 'cash'),
+                    'status': 'pending',
+                    'payment_status': 'pending',
+                    'created_at': datetime.utcnow(),
+                    'updated_at': datetime.utcnow()
+                }
+                
+                db.collection(Collections.BOOKINGS).document(booking_id).set(booking_data)
+                
+                vehicle = context.get('selected_vehicle', {})
+                pickup = context.get('pickup_branch', {})
+                dropoff = context.get('dropoff_branch', {})
+                
+                confirmation = f"""
+✅ **BOOKING CONFIRMED!**
+
+Booking ID: {booking_id[:8]}
+
+🚗 Vehicle: {vehicle.get('make')} {vehicle.get('model')}
+📅 Dates: {context['start_date']} to {context['end_date']}
+📍 Pickup: {pickup.get('name')}
+📍 Dropoff: {dropoff.get('name')}
+💵 Total: {context.get('total_price', 0):.2f} SAR
+
+Thank you for choosing Hanco AI! Your booking is confirmed.
+
+Need anything else? Just say 'hi' to start a new booking.
+"""
+                
+                return {
+                    'reply': confirmation,
+                    'next_state': STATE_COMPLETED,
+                    'context': {},
+                    'data': {'booking_id': booking_id}
+                }
+                
+            except Exception as e:
+                logger.error(f"Error creating booking: {e}")
+                return {
+                    'reply': "Sorry, there was an error creating your booking. Please try again later.",
+                    'next_state': STATE_IDLE,
+                    'context': {}
+                }
+        
+        elif 'no' in msg_lower or 'cancel' in msg_lower:
+            return {
+                'reply': "Booking cancelled. Would you like to start over? Say 'hi' to begin.",
+                'next_state': STATE_IDLE,
+                'context': {}
+            }
+        else:
+            return {
+                'reply': "Please reply 'yes' to confirm or 'no' to cancel:",
+                'next_state': STATE_CONFIRM,
+                'context': context
+            }
+    
+    def _parse_dates(self, text: str) -> tuple:
+        """Parse date range from text"""
+        text = text.lower().replace("–", "-")
+        
+        # Try common patterns
+        if " to " in text:
+            parts = text.split(" to ", 1)
+        elif " - " in text:
+            parts = text.split(" - ", 1)
+        else:
+            parts = [text]
+        
+        if len(parts) == 2:
+            start = self._parse_single_date(parts[0].strip())
+            end = self._parse_single_date(parts[1].strip())
+            if start and end:
+                return start, end
+        
+        # Try finding two date patterns
+        date_pattern = r'\d{4}-\d{2}-\d{2}'
+        dates = re.findall(date_pattern, text)
+        if len(dates) >= 2:
+            try:
+                return date.fromisoformat(dates[0]), date.fromisoformat(dates[1])
+            except:
+                pass
+        
+        return None, None
+    
+    def _parse_single_date(self, text: str) -> Optional[date]:
+        """Parse single date from text"""
+        formats = [
+            "%Y-%m-%d",
+            "%d-%m-%Y",
+            "%d/%m/%Y",
+            "%b %d %Y",     # Jan 15 2026
+            "%B %d %Y",     # January 15 2026
+            "%d %b %Y",     # 15 Jan 2026
+            "%d %B %Y",     # 15 January 2026
+            "%b %d, %Y",    # Jan 15, 2026
+            "%B %d, %Y",    # January 15, 2026
+            "%b %d",        # Jan 15 (current year)
+            "%B %d",        # January 15 (current year)
+            "%d %b",        # 15 Jan (current year)
+            "%d %B",        # 15 January (current year)
+        ]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(text, fmt)
+                # If no year in format, use current year or next year if date passed
+                if dt.year == 1900:
+                    current_date = date.today()
+                    dt = dt.replace(year=current_date.year)
+                    # If the date is in the past, assume next year
+                    if dt.date() < current_date:
+                        dt = dt.replace(year=current_date.year + 1)
+                return dt.date()
+            except ValueError:
+                continue
+        
+        return None
+    
+    async def _get_or_create_session(self, session_id: str, guest_id: str) -> Dict:
+        """Get or create chat session"""
+        try:
+            doc = db.collection(Collections.CHAT_SESSIONS).document(session_id).get()
+            
+            if doc.exists:
+                return doc.to_dict()
+            else:
+                session_data = {
+                    'session_id': session_id,
+                    'guest_id': guest_id,
+                    'state': STATE_IDLE,
+                    'context': {},
+                    'created_at': datetime.utcnow(),
+                    'updated_at': datetime.utcnow()
+                }
+                db.collection(Collections.CHAT_SESSIONS).document(session_id).set(session_data)
+                return session_data
+                
+        except Exception as e:
+            logger.error(f"Error loading session: {e}")
+            return {
+                'session_id': session_id,
+                'guest_id': guest_id,
+                'state': STATE_IDLE,
+                'context': {}
+            }
+    
+    async def _update_session(self, session_id: str, state: str, context: Dict):
+        """Update chat session state"""
+        try:
+            db.collection(Collections.CHAT_SESSIONS).document(session_id).update({
+                'state': state,
+                'context': context,
+                'updated_at': datetime.utcnow()
+            })
+        except Exception as e:
+            logger.error(f"Error updating session: {e}")
+    
+    async def _store_message(self, session_id: str, user_message: str, bot_reply: str):
+        """Store chat message"""
+        try:
+            message_id = str(uuid.uuid4())
+            message_data = {
+                'id': message_id,
+                'session_id': session_id,
+                'user_message': user_message,
+                'bot_reply': bot_reply,
+                'timestamp': datetime.utcnow()
+            }
+            db.collection(Collections.CHAT_MESSAGES).document(message_id).set(message_data)
+        except Exception as e:
+            logger.error(f"Error storing message: {e}")
+    
+    async def _extract_vehicle_type_with_gemini(self, message: str, available_types: List[str]) -> Optional[str]:
+        """Use Gemini to extract vehicle type from user message"""
+        if not self.gemini_api_key:
+            return None
+        
+        try:
+            available_str = ", ".join(available_types) if available_types else "economy, sedan, suv, luxury"
+            
+            prompt = f"""Extract the vehicle category from this user message.
+
+User message: "{message}"
+
+Available categories: {available_str}
+
+Rules:
+- Return ONLY the category name in lowercase
+- If user mentions multiple categories, return the first one
+- If no clear category is mentioned, return "none"
+- Common synonyms:
+  * "car", "small car", "compact" -> economy
+  * "sedan", "medium car", "4-door" -> sedan  
+  * "suv", "big car", "family car", "large" -> suv
+  * "luxury", "premium", "high-end" -> luxury
+
+Response (one word only):"""
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{GEMINI_API_URL}?key={self.gemini_api_key}",
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": 20,
+                        },
+                    },
+                )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("candidates"):
+                    text = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
+                    # Match case-insensitively and return the exact database value
+                    for vtype in (available_types or VEHICLE_TYPES):
+                        if text == vtype.lower() or text in vtype.lower() or vtype.lower() in text:
+                            return vtype  # Return exact database value (preserves case)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Gemini extraction error: {e}")
+            return None
+
+
+# Global orchestrator instance
+orchestrator = ChatbotOrchestrator()
