@@ -8,7 +8,7 @@ import logging
 from google.cloud.firestore_v1 import FieldFilter
 
 from app.services.weather.open_meteo import get_weather_features
-from app.services.competitors.crawler import scrape_all_providers
+# from app.services.competitors.crawler import scrape_all_providers  # Disabled due to dependency conflicts
 
 logger = logging.getLogger(__name__)
 
@@ -112,19 +112,10 @@ async def get_avg_competitor_price(
         
         # Option 1: Real-time scraping (fresh data)
         if use_realtime:
-            logger.info(f"Fetching real-time competitor prices for {city}/{category}")
-            
-            # Scrape all providers in parallel
-            scraped_data = await scrape_all_providers(city, category)
-            
-            # Extract prices from scrape results
-            for provider, offers in scraped_data.items():
-                for offer in offers:
-                    price = offer.get('price', 0)
-                    if price > 0:
-                        prices.append(price)
-            
-            logger.info(f"Scraped {len(prices)} real-time prices from {len(scraped_data)} providers")
+            logger.warning(f"Real-time competitor scraping requested but crawl4ai is disabled")
+            # Scraping disabled - fall back to historical data
+            # scraped_data = await scrape_all_providers(city, category)
+            # [Scraping code removed]
         
         # Option 2: Historical data from Firestore (cached)
         else:

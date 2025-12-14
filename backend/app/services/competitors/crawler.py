@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from bs4 import BeautifulSoup
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+# from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode  # Disabled due to dependency conflicts
 from google.cloud import firestore
 
 from app.core.firebase import db
@@ -54,6 +54,9 @@ async def fetch_html(url: str, use_cache: bool = True) -> str:
     """
     Fetch rendered HTML using Crawl4AI headless browser.
     
+    NOTE: Crawl4AI is currently disabled due to dependency conflicts.
+    This function will raise NotImplementedError until the issue is resolved.
+    
     Args:
         url: Target URL to scrape
         use_cache: Whether to use 5-minute cache
@@ -62,71 +65,10 @@ async def fetch_html(url: str, use_cache: bool = True) -> str:
         Rendered HTML content
         
     Raises:
-        Exception: If crawling fails
+        NotImplementedError: Crawl4AI is currently disabled
     """
-    # Check cache first
-    if use_cache and url in _html_cache:
-        cached = _html_cache[url]
-        age = (datetime.utcnow() - cached['timestamp']).total_seconds()
-        if age < 300:  # 5 minutes
-            logger.info(f"Using cached HTML for {url} (age: {age:.0f}s)")
-            return cached['html']
-    
-    try:
-        logger.info(f"Fetching HTML from: {url}")
-        
-        # Configure browser for production scraping
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=False,
-            extra_args=["--disable-gpu", "--no-sandbox"]
-        )
-        
-        # Configure crawler
-        crawler_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,
-            page_timeout=30000,  # 30 seconds
-            wait_for="body",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-            }
-        )
-        
-        # Fetch with Crawl4AI
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=url, config=crawler_config)
-            
-            if not result.success:
-                raise Exception(f"Crawl failed: {result.error_message}")
-            
-            html = result.html
-            
-            # Cache the result
-            if use_cache:
-                _html_cache[url] = {
-                    'html': html,
-                    'timestamp': datetime.utcnow()
-                }
-            
-            logger.info(f"Successfully fetched {len(html)} bytes from {url}")
-            return html
-            
-    except Exception as e:
-        logger.error(f"Error fetching {url}: {str(e)}")
-        
-        # Log failure to Firestore
-        try:
-            db.collection('scrape_failures').add({
-                'url': url,
-                'error': str(e),
-                'timestamp': firestore.SERVER_TIMESTAMP
-            })
-        except:
-            pass
-        
-        raise
+    logger.warning(f"fetch_html called but crawl4ai is disabled. URL: {url}")
+    raise NotImplementedError("Competitor scraping is currently disabled due to dependency conflicts with crawl4ai")
 
 
 def _extract_price(price_text: str) -> float:
@@ -500,6 +442,9 @@ async def scrape_all_providers(city: str, category: Optional[str] = None) -> Dic
     """
     Scrape all providers in parallel for a specific city.
     
+    NOTE: Crawl4AI is currently disabled due to dependency conflicts.
+    This function will return empty data until the issue is resolved.
+    
     This is the main entry point for competitor price scraping.
     Used by the pricing engine to get real-time competitor data.
     
@@ -508,38 +453,16 @@ async def scrape_all_providers(city: str, category: Optional[str] = None) -> Dic
         category: Optional category filter (economy, sedan, suv, luxury)
         
     Returns:
-        Dictionary mapping provider names to lists of offers:
+        Dictionary mapping provider names to empty lists (scraping disabled):
         {
-            "key": [...],
-            "budget": [...],
-            "yelo": [...],
-            "lumi": [...]
+            "key": [],
+            "budget": [],
+            "yelo": [],
+            "lumi": []
         }
     """
-    logger.info(f"Scraping all providers for city={city}, category={category}")
-    
-    # Create tasks for parallel scraping
-    tasks = {
-        provider: scrape_provider(provider, city, category)
-        for provider in PROVIDER_URLS.keys()
-    }
-    
-    # Execute all tasks in parallel
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    
-    # Map results back to providers
-    scraped_data = {}
-    for provider, result in zip(tasks.keys(), results):
-        if isinstance(result, Exception):
-            logger.error(f"Failed to scrape {provider}: {result}")
-            scraped_data[provider] = []
-        else:
-            scraped_data[provider] = result
-    
-    total_offers = sum(len(offers) for offers in scraped_data.values())
-    logger.info(f"Scraped {total_offers} total offers from {len(scraped_data)} providers")
-    
-    return scraped_data
+    logger.warning(f"scrape_all_providers called but crawl4ai is disabled. City={city}, category={category}")
+    return {provider: [] for provider in PROVIDER_URLS.keys()}
 
 
 # ==================== LEGACY SUPPORT FUNCTIONS ====================
